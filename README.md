@@ -1,4 +1,4 @@
-# robot-twin
+# robot-twin-client
 
 로봇 트윈 HTTP API 클라이언트, **pick-and-place 시퀀스 예제**, 그리고 로봇을 LLM
 에이전트에게 노출하는 **MCP 서버**.
@@ -12,8 +12,13 @@
 > 같은 이름의 ROS 파이썬 패키지(트윈 서버 본체)가 있다. ROS 를 source 한 셸에서는
 > `PYTHONPATH` 가 editable 설치의 `.pth` 보다 먼저 검색되므로 그쪽이 이 패키지를
 > 가려버린다 (증상: `No module named robot_twin.mcp_server`). 이름을 겹치지 않게
-> 두는 것으로 해결한다. 배포 이름(`robot-twin`)과 명령 이름(`robot-twin-mcp`,
-> `robot-twin-pick`)은 충돌하지 않으므로 그대로 둔다.
+> 두는 것으로 해결한다. 저장소·배포 이름도 같은 이유로 `robot-twin-client` 이고,
+> 클래스도 `RobotTwinClient` 다 (2026-09-11 개명) — 이 저장소는 트윈이 아니라 트윈을
+> **호출하는 쪽**이라는 것이 세 이름에 일관되게 드러난다.
+>
+> **명령 이름 넷과 MCP 등록 이름은 `robot-twin` 접두사 그대로다** (`robot-twin-mcp`,
+> `robot-twin-pick`, `robot-twin-stack`, `robot-twin-peg`). 충돌하지 않고, 등록 이름을
+> 바꾸면 이미 등록된 `claude mcp get robot-twin` 이 끊긴다.
 
 ## 구성
 

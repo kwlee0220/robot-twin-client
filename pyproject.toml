@@ -1,5 +1,5 @@
 [project]
-name = "robot-twin"
+name = "robot-twin-client"
 version = "0.1.0"
 description = "Robot twin HTTP client and a pick sequence example (user guide 4.9)"
 readme = "README.md"
