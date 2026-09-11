@@ -1,0 +1,286 @@
+{
+  // pick_n_place.py 는 상대 임포트를 쓰므로 파일 경로가 아니라 모듈(-m)로 실행한다.
+  // 진입점은 __main__.py 라 대상 모듈 이름이 바뀌어도 여기는 고칠 것이 없다.
+  //
+  // **쌓기(stack)는 -m 을 쓸 수 없다.** __main__.py 는 pick_n_place 로 가고,
+  // -m robot_twin_client.stack 은 __init__ 이 이미 임포트한 모듈을 runpy 가 한 번 더
+  // 실행해 RuntimeWarning('found in sys.modules ...') 이 난다. 그래서 콘솔 스크립트
+  // (.venv/bin/robot-twin-stack) 를 program 으로 띄운다 — `uv sync` 가 만든다.
+  //
+  // 이 스크립트는 **로봇 조작만** 한다 — 세션/에피소드 경계를 다루지 않으므로
+  // --task-label 같은 수집용 인자가 없다. 경계까지 필요하면 MCP 서버의
+  // begin_task / end_task 를 쓴다.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "pick & place (기본: one_cube, 반시계 30°)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robot_twin_client",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false,
+      "args": [
+        "--scene", "cube_and_ball",
+        // mock 백엔드에는 물리가 없어 파지해도 stalled 가 서지 않는다. 이 플래그가
+        // 없으면 파지에서 멈춰 그 뒤(상승·이송·놓기)를 볼 수 없다.
+        // **실제 로봇에 붙일 때는 뺀다** — 빈손인 채로 이송하게 된다.
+        "--allow-empty-grasp",
+      ]
+    },
+    {
+      "name": "pick & place (씬·시드 입력)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robot_twin_client",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false,
+      // 좌표는 넘기지 않는다 — reset_scene 이 실제로 배치한 자리를 집는다.
+      "args": [
+        "--host", "${input:host}",
+        "--port", "${input:port}",
+        "--twin-id", "${input:twinId}",
+        "--scene", "${input:scene}",
+        "--seed", "${input:seed}",
+        "--angle", "${input:angle}",
+        "--home", "${input:home}",
+        // mock 백엔드에는 물리가 없어 파지해도 stalled 가 서지 않는다. 이 플래그가
+        // 없으면 파지에서 멈춰 그 뒤(상승·이송·놓기)를 볼 수 없다.
+        // **실제 로봇에 붙일 때는 뺀다** — 빈손인 채로 이송하게 된다.
+        "--allow-empty-grasp"
+      ]
+    },
+    {
+      "name": "pick & place (좌표 강제 지정)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "robot_twin_client",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false,
+      // -x/-y/-z 는 배치 좌표를 덮어쓴다. 그 자리에 물체가 없으면 파지에 실패한다.
+      "args": [
+        "--scene", "${input:scene}",
+        "--seed", "${input:seed}",
+        "-x", "${input:x}",
+        "-y", "${input:y}",
+        "-z", "${input:z}",
+        "--clearance", "${input:clearance}",
+        "--angle", "${input:angle}",
+        // mock 백엔드에는 물리가 없어 파지해도 stalled 가 서지 않는다. 이 플래그가
+        // 없으면 파지에서 멈춰 그 뒤(상승·이송·놓기)를 볼 수 없다.
+        // **실제 로봇에 붙일 때는 뺀다** — 빈손인 채로 이송하게 된다.
+        "--allow-empty-grasp"
+      ]
+    },
+    {
+      // 물체를 집어 다른 물체 위에 얹는다. 기본값이 pick & place 와 다르다 —
+      // 쌓기는 물리가 있어야 뜻이 있어 mock(8801/panda01)이 아니라 Isaac 을 본다.
+      "name": "쌓기 (기본: cylinder_a → block_a, Isaac)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/.venv/bin/robot-twin-stack",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false,
+      // 인자 없음 = 모듈 기본값(8802 / panda_isaac / cylinder_a → block_a).
+      // **시작할 때 reset_scene 이 먼저 돈다** — 안 그러면 두 번째 실행이 이미
+      // 얹혀 있는 물체를 다시 집어 제자리에 놓는 꼴이 된다. 겹쳐 쌓으려면
+      // --no-reset 을 준다.
+      "args": []
+    },
+    {
+      "name": "쌓기 (대상·트윈 입력)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/.venv/bin/robot-twin-stack",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false,
+      // 좌표는 넘기지 않는다 — scene_objects 에서 읽은 실제 자리를 집고,
+      // 놓을 높이는 쥔 뒤 실측한 오프셋으로 정한다.
+      "args": [
+        "--host", "${input:stackHost}",
+        "--port", "${input:stackPort}",
+        "--twin-id", "${input:stackTwinId}",
+        "--source", "${input:stackSource}",
+        "--base", "${input:stackBase}",
+        "--scene", "${input:stackScene}",
+        "--seed", "${input:stackSeed}",
+        "--gap", "${input:stackGap}",
+        "--clearance", "${input:stackClearance}",
+        "--home", "${input:home}"
+      ]
+    },
+    {
+      // 이미 놓여 있는 것 위에 하나 더 얹는다 — 리셋을 건너뛴다.
+      // A 위에 B 를 올린 뒤 그 위에 C 를 올리는 식으로 겹쳐 쓸 때.
+      "name": "쌓기 (리셋 없이, 이어서 쌓기)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/.venv/bin/robot-twin-stack",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false,
+      "args": [
+        "--source", "${input:stackSource}",
+        "--base", "${input:stackBase}",
+        "--no-reset"
+      ]
+    },
+    {
+      // **코드 경로만 밟아 보는 용도다.** mock 은 물리가 없어 물체가 서로 얹히지
+      // 않으므로, 시퀀스는 끝까지 돌아도 verify_stacked 가 실패를 보고하고 종료
+      // 코드가 1 이 된다 — 그것이 맞는 결과다. 쌓였는지 보려면 Isaac 을 쓴다.
+      "name": "쌓기 (mock 에서 시퀀스만 디버그)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/.venv/bin/robot-twin-stack",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false,
+      "args": [
+        "--port", "8801",
+        "--twin-id", "panda01",
+        "--source", "${input:stackSource}",
+        "--base", "${input:stackBase}",
+        // mock 트윈은 씬 레시피 이름이 다르다(two_objects 가 없다). 이미 놓여
+        // 있는 것을 그대로 쓴다.
+        "--no-reset",
+        // mock 은 파지해도 stalled 가 서지 않는다. 이 플래그가 없으면 파지에서
+        // 멈춰 그 뒤(이송·놓기)를 볼 수 없다. **실제 로봇에서는 뺀다.**
+        "--allow-empty-grasp"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "host",
+      "type": "promptString",
+      "description": "트윈 호스트",
+      "default": "127.0.0.1"
+    },
+    {
+      "id": "port",
+      "type": "promptString",
+      "description": "트윈 포트",
+      "default": "8801"
+    },
+    {
+      "id": "twinId",
+      "type": "promptString",
+      "description": "트윈 ID",
+      "default": "panda01"
+    },
+    {
+      "id": "scene",
+      "type": "promptString",
+      "description": "씬 레시피 이름 (트윈 설정에 선언된 것)",
+      "default": "one_cube"
+    },
+    {
+      "id": "seed",
+      "type": "promptString",
+      "description": "배치 랜덤 시드 (같은 시드 = 같은 배치)",
+      "default": "0"
+    },
+    {
+      "id": "x",
+      "type": "promptString",
+      "description": "파지 지점 x (m) — 배치 좌표를 덮어쓴다",
+      "default": "0.40"
+    },
+    {
+      "id": "y",
+      "type": "promptString",
+      "description": "파지 지점 y (m) — 배치 좌표를 덮어쓴다",
+      "default": "0.0"
+    },
+    {
+      "id": "z",
+      "type": "promptString",
+      "description": "파지 지점 z (m) — 배치 좌표를 덮어쓴다",
+      "default": "0.10"
+    },
+    {
+      "id": "clearance",
+      "type": "promptString",
+      "description": "접근 높이 (m)",
+      "default": "0.10"
+    },
+    {
+      "id": "angle",
+      "type": "promptString",
+      "description": "놓을 자리의 반시계 회전각 (deg, 베이스 z축 기준)",
+      "default": "30"
+    },
+    {
+      "id": "home",
+      "type": "promptString",
+      "description": "복귀할 SRDF named target ('panda_arm' 그룹)",
+      "default": "ready"
+    },
+    {
+      "id": "stackHost",
+      "type": "promptString",
+      "description": "트윈 호스트 (쌓기)",
+      "default": "127.0.0.1"
+    },
+    {
+      "id": "stackPort",
+      "type": "promptString",
+      "description": "트윈 포트 (쌓기 — Isaac 은 8802)",
+      "default": "8802"
+    },
+    {
+      "id": "stackTwinId",
+      "type": "promptString",
+      "description": "트윈 ID (쌓기 — Isaac 은 panda_isaac)",
+      "default": "panda_isaac"
+    },
+    {
+      "id": "stackSource",
+      "type": "promptString",
+      "description": "집어 올릴 물체 이름 (scene_objects 의 키)",
+      "default": "cylinder_a"
+    },
+    {
+      "id": "stackBase",
+      "type": "promptString",
+      "description": "그 위에 얹을 받침 물체 이름",
+      "default": "block_a"
+    },
+    {
+      "id": "stackScene",
+      "type": "promptString",
+      "description": "쌓기 전에 배치할 씬 레시피 (Isaac: two_objects)",
+      "default": "two_objects"
+    },
+    {
+      "id": "stackSeed",
+      "type": "promptString",
+      "description": "배치 랜덤 시드 (같은 시드 = 같은 배치)",
+      "default": "0"
+    },
+    {
+      "id": "stackGap",
+      "type": "promptString",
+      "description": "놓을 때 받침 상면 위로 띄우는 틈 (m) — 0 이면 접촉이 먼저 나 밀어낸다",
+      "default": "0.004"
+    },
+    {
+      "id": "stackClearance",
+      "type": "promptString",
+      "description": "이송 높이 (m) — 쌓은 뒤 높이 위로 이만큼 띄운다",
+      "default": "0.15"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+# uv 가 만드는 가상환경. 48 MB 이고 uv.lock 으로 그대로 재현되므로 담지 않는다.
+.venv/
+
+# 파이썬 산물
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# pytest 캐시
+.pytest_cache/
+
+# `.env` 와 `.vscode/` 는 **일부러 추적한다.**
+# .env 는 비밀값이 아니라 PYTEST_DISABLE_PLUGIN_AUTOLOAD 한 줄이다 — ROS 를 source 한
+# 셸에서 pytest 가 ROS 플러그인을 자동 로드하다 죽는 것을 막는다. .vscode/launch.json
+# 이 envFile 로 그 파일을 가리키므로 둘은 같이 있어야 뜻이 산다.
+# ⚠️ 이 저장소는 public 이므로 .env 에 비밀값을 넣으면 안 된다.
