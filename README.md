@@ -89,7 +89,7 @@ require_grasp=False)`) 로 건너뛴다 — 경고를 찍고 진행한다. **실
 ## 설치
 
 ```bash
-cd ~/development/mdtpy/robot-twin
+cd ~/development/mdtpy/robot-twin-client
 uv sync
 ```
 
@@ -356,7 +356,7 @@ GUI 클라이언트는 로그인 셸 PATH 를 보지 못한다).
 손으로 등록한다면 다음과 같다.
 
 ```bash
-claude mcp add robot-twin -- "$(command -v uv)" --directory ~/development/mdtpy/robot-twin \
+claude mcp add robot-twin -- "$(command -v uv)" --directory ~/development/mdtpy/robot-twin-client \
     run --extra mcp robot-twin-mcp
 ```
 
