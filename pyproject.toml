@@ -13,6 +13,9 @@ robot-twin-stack = "robot_twin_client.stack:main"
 # peg 을 다른 고정물로 옮겨 꽂는다. **트윈만 쓴다** — ROS 의존이 없다.
 # 펑션베이 기준이라 기본 포트가 8803 이다.
 robot-twin-peg = "robot_twin_client.peg_in_hole:main"
+# 쌓기를 **학습 데이터 에피소드로** 모은다 — `stack` 을 세션·에피소드 경계로 감싼다.
+# ⚠️ 경계만 찍는다. 실제로 담는 `rdfp_collect` launch 와 rosbag 이 따로 떠 있어야 한다.
+robot-twin-collect = "robot_twin_client.collect:main"
 # MCP 서버. `mcp` extra 를 설치해야 동작한다 (`uv sync --extra mcp`).
 robot-twin-mcp = "robot_twin_client.mcp_server:main"
 
