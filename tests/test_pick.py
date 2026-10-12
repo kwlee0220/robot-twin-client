@@ -76,6 +76,29 @@ def test_pick_aborts_when_the_approach_does_not_reach() -> None:
     assert [op for op, _ in twin.calls] == ['move_gripper_to_target', 'move_linear']
 
 
+class _SettlesShortTwin(FakeTwin):
+    """`move_linear` 은 목표에 닿았다고 보고하지만, 멈춘 뒤 `ee_pose` 는 10 mm 낮다."""
+
+    def read(self, name: str, *, require_ok: bool = True):
+        pose = super().read(name, require_ok=require_ok)
+        if name == 'ee_pose' and pose is not None:
+            p = pose['pose']['position']
+            return {'pose': {'position': {**p, 'z': p['z'] - 0.010}}}
+        return pose
+
+
+def test_pick_judges_reach_on_the_settled_pose() -> None:
+    """**도달 판정은 `move_linear` 의 반환값이 아니라 멈춘 뒤의 `ee_pose` 로 한다.**
+
+    반환값은 종료 시점 스냅샷이라 아직 움직이는 중일 수 있다 — Isaac 쌓기 20회에서
+    실패 7건 중 4건이 그렇게 생긴 가짜 '접근 실패'였다.
+    """
+    twin = _SettlesShortTwin(gripper_by_target={'open': OPENED, 'grasp': HELD})
+
+    assert pick(twin, above_of(GRASP), GRASP) is False
+    assert [op for op, _ in twin.calls].count('move_linear') == 1   # 접근에서 멈춘다
+
+
 def test_down_orientation_is_a_unit_quaternion() -> None:
     assert sum(value * value for value in DOWN.values()) == 1.0
 

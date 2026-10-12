@@ -16,6 +16,7 @@ import math
 
 import pytest
 
+from robot_twin_client import pick_n_place
 from robot_twin_client.pick_n_place import TCP_OFFSET_M, tcp_from_arm_pose
 from robot_twin_client.stack import (
     await_fresh_scene, center_of, half_height_of, held_offset, iteration_seeds,
@@ -59,6 +60,17 @@ class SceneTwin(FakeTwin):
             return {'pose': {'position': {'x': 0.43, 'y': 0.03, 'z': self._hand_z},
                              'orientation': dict(DOWN_HAND)}}
         return super().read(name, require_ok=require_ok)
+
+
+@pytest.fixture(autouse=True)
+def _no_settle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """이 파일의 흐름 테스트에서는 `pick` · `place` 의 정착 대기를 끈다.
+
+    `SceneTwin` 의 `ee_pose` 는 `held_offset` 을 재려고 **고정한 손 위치**라 팔이 어디로
+    갔든 같은 값이다. 정착 뒤 도달 판정이 그 값을 읽으면 모든 이동이 '도달 실패'가 된다.
+    정착 경로 자체는 `test_pick.py` 가 공용 `FakeTwin` 으로 본다.
+    """
+    monkeypatch.setattr(pick_n_place, 'SETTLE_SEC', 0.0)
 
 
 # ----- 치수 해석 -------------------------------------------------------------

@@ -1,13 +1,41 @@
 """테스트용 트윈 스텁.
 
-`pick` 과 헬퍼들은 `RobotTwinClient.run` 만 쓰므로 HTTP 없이 대체할 수 있다.
+`pick` 과 헬퍼들은 `RobotTwinClient.run` 과 `read('ee_pose')` 만 쓰므로 HTTP 없이
+대체할 수 있다.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
+import pytest
+
+from robot_twin_client import ops
 from robot_twin_client.client import OperationFailed
+
+
+class _FakeClock:
+    """`sleep` 이 시간을 흘려보내기만 하는 시계. 실제로는 기다리지 않는다."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def _instant_settle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """정착 대기(`wait_until_still`)를 즉시 끝나게 한다.
+
+    `pick` · `place` 는 이동마다 `ee_pose` 가 멈출 때까지 기다린다. 실제 시계로 두면
+    한 번에 1 초 가까이 걸려 흐름 테스트 하나가 수 초가 된다. 판정 논리는 그대로이고
+    시간만 가짜로 흐른다.
+    """
+    monkeypatch.setattr(ops, 'time', _FakeClock())
 
 
 POSE = {'position': {'x': 0.4, 'y': 0.0, 'z': 0.1},
@@ -43,6 +71,9 @@ class FakeTwin:
         self._pose_outputs = pose_outputs
         self._named_status = named_status
         self._closed_loop = closed_loop
+        # 마지막 `move_linear` 이 멈춘 자리. **실제 트윈처럼 `ee_pose` 가 이것을 돌려준다** —
+        # 정착 대기 뒤의 도달 판정이 이 값을 보므로, 따로 놀면 판정이 엉뚱해진다.
+        self._ee_pose: Optional[dict] = None
 
     def outputs(self, operation: str, inputs: Optional[dict] = None, **kwargs) -> dict:
         """실물 `RobotTwinClient.outputs` 와 **같은 계약** — 실패면 `OperationFailed` 다.
@@ -72,6 +103,7 @@ class FakeTwin:
                 want = inputs['pose']['position']
                 reached = {axis: value + self._offset for axis, value in want.items()}
                 outputs = {'final_pose': {'pose': {'position': reached}}}
+            self._ee_pose = outputs.get('final_pose') or self._ee_pose
             return {'status': self._pose_status, 'outputs': outputs}
 
         if operation == 'move_to_named_target':
@@ -93,6 +125,8 @@ class FakeTwin:
     def read(self, name: str, *, require_ok: bool = True):
         if name == 'session_state':
             return {'state': self._session_state, 'task_label': ''}
+        if name == 'ee_pose':
+            return self._ee_pose
         raise AssertionError(f'unexpected variable: {name}')
 
     # ----- 카탈로그 (MCP 서버가 도구를 자동 생성할 때 쓴다) -----

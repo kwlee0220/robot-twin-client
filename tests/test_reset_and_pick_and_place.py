@@ -98,7 +98,15 @@ def test_no_session_or_episode_operation_is_called() -> None:
 def test_session_state_is_not_even_read() -> None:
     """상태를 보지 않으므로 수집 계층(`rdfp`)이 떠 있지 않아도 동작한다."""
     twin = FakeTwin()
-    twin.read = lambda *a, **k: pytest.fail('session_state 를 읽으면 안 된다')
+    read = twin.read
+
+    def guarded(name: str, **kwargs):
+        # 정착 대기가 `ee_pose` 를 읽는 것은 정상이다 — 막는 것은 세션 상태뿐이다.
+        if name == 'session_state':
+            pytest.fail('session_state 를 읽으면 안 된다')
+        return read(name, **kwargs)
+
+    twin.read = guarded
 
     assert reset_and_pick_and_place(twin, _args()) is True
 

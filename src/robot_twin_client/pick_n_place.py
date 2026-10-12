@@ -115,6 +115,17 @@ def tcp_from_arm_pose(arm_pose: dict) -> dict:
             'orientation': dict(q)}
 
 
+# **도달 판정 전에 정착을 기다린다.** `move_linear` 의 반환은 도달을 뜻하지 않는다 —
+# 끝나자마자 읽으면 아직 움직이는 중의 값을 본다. 2026-09-19 Isaac 실측(쌓기 20회)에서
+# **실패 7건 중 4건이 "접근 실패"였는데 MoveIt 은 `fraction 1.0` · error code 1(SUCCESS)로
+# 전부 성공**이었다 — 정착 없이 5 mm 허용오차로 읽은 값이 떨어진 것이다.
+#
+# ⚠️ **고정 대기가 아니라 상한이다** — 실제로는 `ee_pose` 가 멈출 때까지 기다린다
+# (`wait_until_still`). 펑션베이에서 고정 3 초를 줬다가 하강 뒤 오차를 7.55 mm 로 잘못
+# 읽었고(실제 0.04 mm), 그 값으로 다음 목표를 만들어 삽입이 실패했다 (2026-09-11).
+SETTLE_SEC = 10.0
+
+
 def pick(twin: RobotTwinClient, above: dict, grasp: dict, *,
          require_grasp: bool = True) -> bool:
     """접근 → 하강 → 파지 → 상승. 각 단계의 결과를 확인하고 진행한다.
@@ -132,9 +143,9 @@ def pick(twin: RobotTwinClient, above: dict, grasp: dict, *,
         print('그리퍼를 열지 못했다'); return False
 
     # 접근 지점까지는 자유 계획이 맞지만 move_to_pose 가 미구현이라 직선으로 간다.
-    if not move_linear_verified(twin, to_arm_command(above))['reached']:
+    if not move_linear_verified(twin, to_arm_command(above), settle_sec=SETTLE_SEC)['reached']:
         print('접근 실패'); return False
-    if not move_linear_verified(twin, to_arm_command(grasp))['reached']:
+    if not move_linear_verified(twin, to_arm_command(grasp), settle_sec=SETTLE_SEC)['reached']:
         print('하강 실패'); return False
 
     # 힘을 주며 닫는다. 물체를 물면 stalled 로 끝나고, 끝까지 닫혔다면 빈손이다.
@@ -143,7 +154,7 @@ def pick(twin: RobotTwinClient, above: dict, grasp: dict, *,
             print('아무것도 잡지 못했다'); return False
         print('경고: 파지되지 않았지만 계속한다 (--allow-empty-grasp)')
 
-    return move_linear_verified(twin, to_arm_command(above))['reached']
+    return move_linear_verified(twin, to_arm_command(above), settle_sec=SETTLE_SEC)['reached']
 
 
 def place(twin: RobotTwinClient, above: dict, target: dict) -> bool:
@@ -154,16 +165,16 @@ def place(twin: RobotTwinClient, above: dict, target: dict) -> bool:
     복귀까지 원하면 `return_home` 을 이어서 부른다.
     """
     # pick 이 끝난 지점과 여기 above 는 높이가 같다 — 직선으로 이어도 바닥을 스치지 않는다.
-    if not move_linear_verified(twin, to_arm_command(above))['reached']:
+    if not move_linear_verified(twin, to_arm_command(above), settle_sec=SETTLE_SEC)['reached']:
         print('놓을 자리 접근 실패'); return False
-    if not move_linear_verified(twin, to_arm_command(target))['reached']:
+    if not move_linear_verified(twin, to_arm_command(target), settle_sec=SETTLE_SEC)['reached']:
         print('하강 실패'); return False
 
     # 놓을 때는 힘이 필요 없다. 끝까지 열려야(reached_goal) 물체가 손을 떠난 것이다.
     if not set_gripper(twin, 'open')['reached_goal']:
         print('그리퍼를 열지 못했다 — 아직 쥐고 있다'); return False
 
-    if not move_linear_verified(twin, to_arm_command(above))['reached']:
+    if not move_linear_verified(twin, to_arm_command(above), settle_sec=SETTLE_SEC)['reached']:
         print('상승 실패 — 물체는 놓았다'); return False
 
     return True
