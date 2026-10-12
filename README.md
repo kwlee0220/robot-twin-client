@@ -409,9 +409,12 @@ rdfp_env
 // ~/development/ros/rdfp_ws/.mcp.json
 { "mcpServers": {
     "robot-twin": {
-      "command": "/home/kwlee/development/mdtpy/robot-twin-client/.venv/bin/robot-twin-mcp",
+      "command": "${HOME}/development/mdtpy/robot-twin-client/.venv/bin/robot-twin-mcp",
       "args": ["--port", "8803", "--twin-id", "panda_functionbay"] } } }
 ```
+
+`${HOME}` 은 Claude Code 가 `.mcp.json` 을 읽을 때 환경변수로 펼친다. 체크아웃 위치가
+다르면 그 경로로 바꾼다.
 
 `.mcp.json` 은 **`uv run` 이 아니라 venv 콘솔 스크립트**를 가리킨다. `uv run` 은 기동마다
 의존성을 확인하느라 느려 클라이언트가 타임아웃으로 읽을 수 있다. 대신 venv 는 저절로
