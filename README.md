@@ -3,7 +3,7 @@
 로봇 트윈 HTTP API 클라이언트, **pick-and-place 시퀀스 예제**, 그리고 로봇을 LLM
 에이전트에게 노출하는 **MCP 서버**.
 
-`rdfp` 워크스페이스 문서 `docs/robot_twin/robot_twin_user_guide.md` 의 5.9 절 예제를
+`rdfp` 워크스페이스 문서 `docs/twin/robot_twin_user_guide.md` 의 5.9 절 예제를
 독립 실행 가능한 프로젝트로 옮긴 것이다. 트윈은 HTTP 로만 접근하므로 **ROS 설치도
 `source install/setup.bash` 도 필요 없다.** 클라이언트와 예제는 표준 라이브러리만
 쓰고, MCP 서버만 `mcp` extra 를 요구한다.
@@ -363,6 +363,89 @@ claude mcp add robot-twin -- "$(command -v uv)" --directory ~/development/mdtpy/
 > 등록 직후 `claude mcp list` 가 `tools fetch failed` 로 보이면 **트윈이 안 떠
 > 있는 것**이다 — 도구 목록을 트윈 카탈로그에서 가져오기 때문이며, 등록 자체는
 > 정상이다. `./sbin/check_mcp_server.sh` 로 같은 것을 더 자세히 볼 수 있다.
+
+### 펑션베이 로봇에 붙기
+
+펑션베이는 mock 과 **세 가지가 다르다** — 시뮬레이터가 Windows 쪽에 있고, 트윈 포트가
+`8803`, 트윈 이름이 `panda_functionbay` 다.
+
+#### 기동 — 매번 (아래에서 위로)
+
+```bash
+# 0. 시뮬레이터 (Windows) — MetaMotionRobot + SolverTCPServer 가 떠 있어야 한다
+
+# 터미널 A — 로봇 스택 (rdfp_ws)
+rdfp_env
+ros2 launch robot_control panda_functionbay.launch.py
+
+# 터미널 B — 트윈 :8803 (rdfp_ws)
+rdfp_env
+./scripts/run_robot_twin.sh --functionbay
+```
+
+⚠️ **시뮬레이터를 *프로세스째* 재시작했으면 터미널 A 도 다시 띄운다.** 앱 내 재시작은
+시계가 이어지지만 프로세스 재시작은 0 으로 되감겨, 살아남은 노드의 TF 버퍼가 새 데이터를
+`TF_OLD_DATA` 로 버린다. 증상은 **"도구는 성공하는데 팔이 안 움직인다"** 다
+(`rdfp_ws/scripts/kill_stack.sh --ros` 후 재기동).
+
+#### 등록 — 한 번만
+
+**`--port 8803 --twin-id panda_functionbay` 둘 다 필수다.** 서버 기본값이
+`8801` / `panda01`(mock)이라, 포트만 주면 `HTTP 404` 로 도구 조회가 실패하고 둘 다 빼면
+**mock 트윈에 조용히 붙는다.**
+
+**`claude` CLI 가 있으면** 위의 등록 스크립트를 쓴다. **mock 등록과 이름을 나눈다** —
+같은 이름이면 덮어써진다.
+
+```bash
+./sbin/register_mcp_server.sh --name robot-twin-fb --port 8803 --twin-id panda_functionbay
+```
+
+**VSCode 확장처럼 `claude` 가 PATH 에 없으면** 둘 중 하나다 —
+`./sbin/install_claude_cli.sh` 로 CLI 를 깔거나, 작업 워크스페이스 루트에 `.mcp.json` 을
+직접 둔다(Claude Code 가 프로젝트 범위 서버로 읽는다). `rdfp_ws` 에는 이미 있다.
+
+```jsonc
+// ~/development/ros/rdfp_ws/.mcp.json
+{ "mcpServers": {
+    "robot-twin": {
+      "command": "/home/kwlee/development/mdtpy/robot-twin-client/.venv/bin/robot-twin-mcp",
+      "args": ["--port", "8803", "--twin-id", "panda_functionbay"] } } }
+```
+
+`.mcp.json` 은 **`uv run` 이 아니라 venv 콘솔 스크립트**를 가리킨다. `uv run` 은 기동마다
+의존성을 확인하느라 느려 클라이언트가 타임아웃으로 읽을 수 있다. 대신 venv 는 저절로
+따라오지 않으므로 **의존성을 바꾸거나 저장소를 옮기면 `uv sync --extra mcp` 를 다시
+돌린다** — 안 돌리면 `ENOENT` 로 연결조차 안 된다(저장소 이름이 `robot-twin` →
+`robot-twin-client` 로 바뀐 직후 실제로 그랬다).
+
+⚠️ **user scope 등록(`~/.claude.json`)과 `.mcp.json` 에 같은 이름을 두지 않는다** — 어느
+쪽이 이기는지를 기억에 의존하게 된다.
+
+⚠️ **`.mcp.json` 이나 서버 코드를 고쳐도 돌고 있는 서버는 안 바뀐다.** 확장이 시작할 때
+spawn 하므로 창을 다시 로드한다(`Developer: Reload Window`). 고친 줄 알고 옛 서버로
+호출해 `move_linear` 이 10 cm 어긋난 곳으로 간 적이 있다.
+
+#### 확인
+
+```bash
+./sbin/check_mcp_server.sh --port 8803 --twin-id panda_functionbay   # 도구 21개면 정상
+```
+
+Claude Code 에서는 `/mcp` 에 보이면 된다. peg 작업은 `peg_in_hole` 프롬프트와 도구
+넷(`peg_status` · `pick_peg` · `place_peg` · `move_peg`)으로 한다 — 위
+[peg-in-hole](#peg-in-hole--robot-twin-peg) 절.
+
+⚠️ **탁자에 내려놓는 지시는 안 된다.** 시뮬레이터 씬에 `peg ↔ 탁자` 접촉이 없어, 고정물
+밖에서 놓으면 물체가 탁자를 통과해 떨어지고 복구는 시뮬레이터 재시작뿐이다
+(rdfp_ws 벤더 요청 B-14).
+
+| 증상 | 원인 |
+|---|---|
+| `/mcp` 에 없음 · `ENOENT` | 창 리로드 안 함 / `uv sync --extra mcp` 안 함 |
+| `tools fetch failed` · `Connection refused` | 트윈(:8803)이 안 떠 있음 |
+| `HTTP 404` | `--twin-id` 빠짐 — 포트만 줬다 |
+| 도구는 성공하는데 팔이 안 움직임 | ROS 스택 — 시뮬레이터 프로세스 재시작 뒤 스택을 안 띄움 |
 
 ### sbin/
 
