@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from robot_twin_client.client import OperationFailed
-from robot_twin_client.ops import (move_linear_verified, move_to_named_target_verified,
-                                   set_gripper)
+from robot_twin_client.ops import (failure_why, move_linear_verified,
+                                   move_to_named_target_verified, set_gripper)
 
 from conftest import FakeTwin, POSE
 
@@ -138,3 +138,32 @@ def test_set_gripper_grasp_failure_is_not_reported_as_reached() -> None:
                          'stalled': False, 'at_goal': False})
 
     assert set_gripper(twin, 'grasp')['reached_goal'] is False
+
+
+# ----- 실패 코드 → 다음에 할 일 -----
+
+@pytest.mark.parametrize('code,expected', [
+    ('PLANNING_FAILED', '목표나 시작 자세를 바꾼다'),
+    ('EXECUTION_ABORTED', 'ee_pose'),
+    ('TIMEOUT', 'ee_pose'),
+])
+def test_failed_move_says_what_to_do_next(code, expected) -> None:
+    """계획 실패와 실행 실패는 대응이 정반대다 — 코드만 주면 같은 호출을 다시 부른다."""
+    for move in (lambda t: move_linear_verified(t, POSE),
+                 lambda t: move_to_named_target_verified(t, 'ready')):
+        twin = FakeTwin(failures={'move_linear': code, 'move_to_named_target': code})
+        check = move(twin)
+
+        assert check['reached'] is False
+        assert expected in check['why']
+        assert check['result']['error']['code'] == code
+
+
+def test_planning_failure_says_the_robot_did_not_move() -> None:
+    assert '움직이지 않았다' in failure_why({'error': {'code': 'PLANNING_FAILED'}})
+
+
+def test_unknown_failure_code_has_no_hint() -> None:
+    assert failure_why({'error': {'code': 'SOMETHING_NEW'}}) is None
+    assert failure_why({'status': 'FAILED'}) is None
+    assert failure_why(None) is None

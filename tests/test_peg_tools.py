@@ -26,6 +26,25 @@ def test_all_four_tools_are_exposed() -> None:
     assert set(PEG_TOOLS) <= names
 
 
+def test_tools_are_hidden_on_a_twin_without_fixtures() -> None:
+    """고정물 변수가 없는 트윈(mock · Isaac)에서는 보이지 않는다 — 보이면 에이전트가 부른다."""
+    names = {t.name for t in TwinTools(FakeTwin(has_fixtures=False)).list_tools()}
+
+    assert not set(PEG_TOOLS) & names
+    # 다른 도구는 그대로 남는다 — peg 만 빠진다.
+    assert {'read_state', 'move_linear', 'begin_task'} <= names
+
+
+@pytest.mark.parametrize('tool', PEG_TOOLS)
+def test_calling_a_hidden_tool_by_name_is_refused_without_moving(tool: str) -> None:
+    """목록에 없는 도구를 이름으로 찔러도 실행되지 않고, 왜 없는지를 말한다."""
+    twin = FakeTwin(has_fixtures=False)
+
+    with pytest.raises(LookupError, match='fixtures'):
+        TwinTools(twin).call(tool, {'destination': 'peg_hole', 'grasp_gap_m': -0.05})
+    assert twin.calls == []
+
+
 def test_place_peg_requires_the_gap_from_pick_peg() -> None:
     """`grasp_gap_m` 없이는 어디까지 내려야 하는지 알 수 없다 — 스키마가 강제한다."""
     schema = _EXTRA['place_peg']['schema']

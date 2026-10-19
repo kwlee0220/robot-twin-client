@@ -104,6 +104,18 @@ def test_safety_tools_are_reachable(tool):
     assert tool in names
 
 
+def test_schema_violation_over_the_wire_is_a_tool_error_and_does_not_move():
+    """MCP 는 스키마를 전달할 뿐 검증하지 않는다 — 서버가 거르지 않으면 로봇까지 간다."""
+    async def scenario(session: ClientSession):
+        return await session.call_tool('move_to_named_target',
+                                       {'target': 'ready', 'velocity_scaling': 2.0})
+
+    result, twin = anyio.run(_with_session, scenario)
+    assert result.is_error
+    assert 'velocity_scaling' in result.content[0].text
+    assert twin.calls == []
+
+
 # --- 프롬프트 (2026-09-11) ----------------------------------------------------
 #
 # **단위 테스트로는 배선이 틀려도 통과한다.** `_PROMPTS` 를 채워도 핸들러를 등록하지

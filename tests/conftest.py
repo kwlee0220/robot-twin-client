@@ -57,8 +57,16 @@ class FakeTwin:
                  gripper_by_target: Optional[dict] = None,
                  named_status: str = 'COMPLETED', closed_loop: bool = True,
                  scene_objects: Optional[list] = None,
-                 session_state: str = 'IDLE') -> None:
+                 session_state: str = 'IDLE',
+                 failures: Optional[dict] = None,
+                 has_fixtures: bool = True) -> None:
         self.calls: list[tuple[str, dict]] = []
+        # 고정물 변수(`fixtures`)를 내놓는가 — 펑션베이 트윈만 그렇다. 기본은 내놓는 쪽이라
+        # peg 도구가 목록에 보인다. mock · Isaac 을 흉내내려면 False 로 둔다.
+        self._has_fixtures = has_fixtures
+        # 연산 이름 → 오류 코드. 그 연산은 접수 뒤 실패(`FAILED`)로 끝난다 — 동기 세션
+        # 연산의 상태 거절이나 이동의 계획 실패를 흉내낸다.
+        self._failures = failures or {}
         self._scene_objects = (SCENE_OBJECTS if scene_objects is None else scene_objects)
         self._session_state = session_state
         self._gripper = gripper or {'reached_goal': True, 'stalled': False, 'position': 0.04}
@@ -89,6 +97,11 @@ class FakeTwin:
     def run(self, operation: str, inputs: Optional[dict] = None) -> dict:
         inputs = inputs or {}
         self.calls.append((operation, inputs))
+
+        if operation in self._failures:
+            return {'status': 'FAILED',
+                    'error': {'code': self._failures[operation],
+                              'message': f'{operation} failed'}}
 
         if operation == 'move_gripper_to_target':
             target = inputs['target']
@@ -138,7 +151,10 @@ class FakeTwin:
         return {n: {'quality': 'OK', 'value': self.read(n)} for n in names}
 
     def variables(self) -> list:
-        return [{'name': 'session_state', 'description': '수집 상태', 'units': {}}]
+        catalog = [{'name': 'session_state', 'description': '수집 상태', 'units': {}}]
+        if self._has_fixtures:
+            catalog.append({'name': 'fixtures', 'description': '고정물 기하', 'units': {}})
+        return catalog
 
     def operations(self) -> list:
         """`GET /operations` 응답 모양. 트윈 설정의 실제 구성을 축약한 것이다."""

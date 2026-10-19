@@ -1,4 +1,4 @@
-"""연산 호출 위에 얹는 검증 헬퍼 (사용 설명서 5.6 / 5.7 절).
+"""연산 호출 위에 얹는 검증 헬퍼 (사용자 가이드 5.6 / 5.7 절).
 
 트윈은 `COMPLETED` 를 "연산이 끝났다" 는 뜻으로만 쓴다. **도달했는지 · 물체를
 쥐었는지는 클라이언트가 판단해야 한다.** 그 판단을 이 모듈에 모아 둔다.
@@ -11,6 +11,27 @@ from typing import Optional
 import time
 
 from .client import RobotTwinClient
+
+# 실패 코드별로 **다음에 할 일** (트윈 사용자 가이드 3.4). 코드만 돌려주면 호출자 — 특히
+# 에이전트 — 는 같은 호출을 그대로 다시 부른다. 계획 실패와 실행 실패는 대응이 정반대라
+# 갈라 둔다: 계획 실패는 로봇이 제자리라 목표를 바꿔야 하고, 실행 실패는 로봇이 경로
+# 중간에 있을 수 있어 위치부터 확인해야 한다.
+FAILURE_HINTS = {
+    'PLANNING_FAILED': ('계획 실패 — 로봇은 움직이지 않았다. 같은 목표로 다시 불러도 결과가 '
+                        '같으니 목표나 시작 자세를 바꾼다'),
+    'EXECUTION_ABORTED': ('실행 실패 — 로봇이 경로 중간에 있을 수 있다. ee_pose 로 현재 위치를 '
+                          '확인한 뒤 판단한다'),
+    'TIMEOUT': '시간 초과 — 로봇이 아직 움직이는 중일 수 있다. ee_pose 로 현재 위치를 확인한다',
+    'PRECONDITION_FAILED': ('현재 상태에서 받을 수 없는 요청이다 — 아무것도 실행되지 않았다. '
+                            '재시도가 아니라 상태(session_state 등)를 먼저 맞춘다'),
+    'ESTOP_ENGAGED': '비상정지로 중단됐다 — 사람이 해제하기 전에는 아무것도 움직이지 않는다',
+}
+
+
+def failure_why(state: Optional[dict]) -> Optional[str]:
+    """실패로 끝난 세션 상태에서 다음에 할 일을 찾는다. 모르는 코드면 ``None``."""
+    code = ((state or {}).get('error') or {}).get('code')
+    return FAILURE_HINTS.get(code or '')
 
 
 def wait_until_still(twin: RobotTwinClient, *, timeout_sec: float = 10.0,
@@ -71,9 +92,9 @@ def move_linear_verified(twin: RobotTwinClient, pose: dict, *, tol_m: float = 0.
         inputs['frame'] = frame
     result = twin.run('move_linear', inputs)
     if result['status'] != 'COMPLETED':
-        return {'reached': False, 'result': result}
+        return _not_reached(result)
 
-    # 상태 변수가 비어 있으면 키 자체가 없다 (사용 설명서 4.3).
+    # 상태 변수가 비어 있으면 키 자체가 없다 (사용자 가이드 4.3).
     final = result.get('outputs', {}).get('final_pose')
     if settle_sec > 0:
         # 정착을 기다린 뒤 **다시 읽는다** — outputs 의 값은 종료 시점 스냅샷이다.
@@ -88,7 +109,7 @@ def move_linear_verified(twin: RobotTwinClient, pose: dict, *, tol_m: float = 0.
 
 def move_to_named_target_verified(twin: RobotTwinClient, target: str, *,
                                   velocity_scaling: float = 0.3) -> dict:
-    """SRDF named target 으로 이동한 뒤 도달했는지 확인한다 (사용 설명서 4.2).
+    """SRDF named target 으로 이동한 뒤 도달했는지 확인한다 (사용자 가이드 4.2).
 
     판정 기준이 `move_linear` 과 다르다. 관절 공간 계획이라 **부분 실행이 없어**
     좌표를 비교할 필요가 없는 대신, 실행이 open loop 일 수 있다.
@@ -106,7 +127,7 @@ def move_to_named_target_verified(twin: RobotTwinClient, target: str, *,
     result = twin.run('move_to_named_target',
                       {'target': target, 'velocity_scaling': velocity_scaling})
     if result['status'] != 'COMPLETED':
-        return {'reached': False, 'result': result}
+        return _not_reached(result)
 
     # closed_loop 는 항상 온다 (6.3). 없다면 트윈 쪽이 규격을 벗어난 것이다.
     if not result.get('outputs', {}).get('closed_loop'):
@@ -114,6 +135,15 @@ def move_to_named_target_verified(twin: RobotTwinClient, target: str, *,
                 'why': 'open loop — COMPLETED 가 도달을 보장하지 않는다'}
 
     return {'reached': True, 'result': result}
+
+
+def _not_reached(result: dict) -> dict:
+    """실패로 끝난 이동의 반환값. 코드를 알면 `why` 에 다음에 할 일을 싣는다."""
+    out = {'reached': False, 'result': result}
+    why = failure_why(result)
+    if why is not None:
+        out['why'] = why
+    return out
 
 
 def set_gripper(twin: RobotTwinClient, target: str) -> dict:
@@ -141,5 +171,5 @@ def set_gripper(twin: RobotTwinClient, target: str) -> dict:
     return outputs
 
 
-__all__ = ['move_linear_verified', 'move_to_named_target_verified', 'set_gripper',
-           'wait_until_still']
+__all__ = ['FAILURE_HINTS', 'failure_why', 'move_linear_verified',
+           'move_to_named_target_verified', 'set_gripper', 'wait_until_still']

@@ -14,8 +14,8 @@ from typing import Any
 import pytest
 
 from conftest import SCENE_OBJECTS, FakeTwin
-from robot_twin_client.client import TwinError
-from robot_twin_client.mcp_server import TwinTools, _error_text
+from robot_twin_client.client import OperationFailed, TwinError
+from robot_twin_client.mcp_server import InvalidToolInput, TwinTools, _error_text
 from robot_twin_client.pick_n_place import TCP_OFFSET_M
 
 
@@ -76,6 +76,17 @@ def test_every_tool_has_a_description_and_object_schema():
         assert tool.input_schema['type'] == 'object', tool.name
 
 
+def test_read_state_recommends_variables_that_exist():
+    """설명이 권하는 변수가 없으면 에이전트는 그대로 읽고 NOT_FOUND 를 받는다.
+
+    `gripper_last_command_result` 는 `gripper_state`(`at_goal`)로 합쳐져 트윈에서 없어졌다.
+    """
+    tools, _ = _tools()
+    desc = next(t for t in tools.list_tools() if t.name == 'read_state').description
+    assert 'gripper_last_command_result' not in desc
+    assert 'gripper_state' in desc and 'at_goal' in desc
+
+
 def test_resource_holding_tools_mention_busy_recovery():
     """자원 경합은 트윈 공통 규약이라 설정 설명에 없다 — 서버가 붙인다."""
     tools, _ = _tools()
@@ -96,6 +107,53 @@ def test_hidden_tool_cannot_be_called_directly():
     with pytest.raises(LookupError):
         tools.call('start_episode', {})
     assert twin.calls == []
+
+
+# ----------------------------------------------------------------------
+# 입력 검증 — MCP 는 스키마를 전달할 뿐 검증하지 않는다
+# ----------------------------------------------------------------------
+
+def test_out_of_range_input_is_refused_before_reaching_the_twin():
+    """스키마 상한(1.0)을 넘는 값이 트윈까지 가면 안 된다 — 트윈도 jsonschema 가 있어야 막는다."""
+    tools, twin = _tools()
+    with pytest.raises(InvalidToolInput, match='velocity_scaling'):
+        tools.call('move_to_named_target', {'target': 'ready', 'velocity_scaling': 2.0})
+    assert twin.calls == []
+
+
+def test_missing_required_input_names_the_field():
+    """필수 인자가 빠지면 `KeyError` 가 아니라 무엇이 빠졌는지를 말한다."""
+    tools, twin = _tools()
+    with pytest.raises(InvalidToolInput, match='outcome'):
+        tools.call('end_task', {})
+    assert twin.calls == []
+
+
+def test_catalog_tools_are_checked_against_the_catalog_schema():
+    """자동 생성 도구도 같은 검증을 탄다 — 스키마는 `tools/list` 와 같은 출처에서 온다."""
+    tools, twin = _tools()
+    with pytest.raises(InvalidToolInput, match='target'):
+        tools.call('move_gripper_to_target', {'target': 5})
+    assert twin.calls == []
+
+
+def test_valid_input_still_runs():
+    tools, twin = _tools()
+    tools.call('move_to_named_target', {'target': 'ready', 'velocity_scaling': 0.5})
+    assert twin.calls[0][0] == 'move_to_named_target'
+
+
+def test_invalid_input_error_says_nothing_ran():
+    text = _error_text(InvalidToolInput("invalid input for 'end_task' at <root>: x"))
+    assert '실행하지 않았다' in text and '스키마' in text
+
+
+def test_end_task_describes_what_actually_happens_if_left_open():
+    """닫지 않으면 다음 begin_task 가 failure 로 닫는다 — 경계가 사라지는 것이 아니다."""
+    tools, _ = _tools()
+    desc = next(t for t in tools.list_tools() if t.name == 'end_task').description
+    assert 'failure 로 닫는다' in desc
+    assert '경계를 잃' not in desc
 
 
 # ----------------------------------------------------------------------
@@ -201,6 +259,41 @@ def test_begin_task_closes_a_still_open_task_as_failure():
     assert out['warnings']
 
 
+def test_begin_task_fails_when_the_session_is_refused():
+    """세션 연산은 동기라 `run` 은 `FAILED` 를 예외 없이 돌려준다 — 그대로 쓰면 에피소드가
+    안 열렸는데 작업이 시작된 것으로 보고된다."""
+    tools, twin = _tools(failures={'start_session': 'PRECONDITION_FAILED'})
+
+    with pytest.raises(OperationFailed, match='PRECONDITION_FAILED'):
+        tools.call('begin_task', {'task_label': 'demo'})
+
+    assert 'start_episode' not in _ops(twin)
+    assert tools._task is None
+
+
+def test_begin_task_closes_the_session_when_the_episode_is_refused():
+    """반쯤 열린 상태가 가장 나쁘다 — 세션만 열린 채 남으면 다음 작업이 막힌다."""
+    tools, twin = _tools(failures={'start_episode': 'PRECONDITION_FAILED'})
+
+    with pytest.raises(OperationFailed):
+        tools.call('begin_task', {'task_label': 'demo'})
+
+    assert _ops(twin)[-1] == 'stop_session'
+    assert tools._task is None
+
+
+def test_end_task_reports_a_refused_stop_episode():
+    tools, twin = _tools()
+    tools.call('begin_task', {'task_label': 'demo'})
+    twin._failures['stop_episode'] = 'PRECONDITION_FAILED'
+
+    result = tools.call('end_task', {'outcome': 'success'})
+
+    assert result['closed'] is False
+    assert any('stop_episode' in e and 'PRECONDITION_FAILED' in e for e in result['errors'])
+    assert 'stop_session' in _ops(twin)
+
+
 def test_end_task_closes_both_boundaries():
     tools, twin = _tools()
     tools.call('begin_task', {'task_label': 'demo'})
@@ -275,14 +368,56 @@ def test_shutdown_is_a_noop_without_an_open_task():
 # 오류 문장 — 에이전트의 유일한 피드백 채널
 # ----------------------------------------------------------------------
 
-@pytest.mark.parametrize('code,expected', [
-    ('RESOURCE_BUSY', 'get_resource_status'),
-    ('PRECONDITION_FAILED', 'session_state'),
-    ('NOT_FOUND', 'list_state_variables'),
+@pytest.mark.parametrize('status,code,expected', [
+    (409, 'RESOURCE_BUSY', 'get_resource_status'),
+    (404, 'NOT_FOUND', 'list_state_variables'),
+    (503, 'PRECONDITION_FAILED', '사람에게 알린다'),
 ])
-def test_error_text_tells_the_agent_how_to_recover(code, expected):
-    text = _error_text(TwinError(409, {'error': {'code': code, 'message': 'x'}}))
+def test_error_text_tells_the_agent_how_to_recover(status, code, expected):
+    text = _error_text(TwinError(status, {'error': {'code': code, 'message': 'x'}}))
     assert expected in text
+
+
+def test_backend_absence_is_not_reported_as_a_state_mismatch():
+    """세션을 만들기 전의 `PRECONDITION_FAILED`(503)는 백엔드 부재다 — 상태를 맞춰도 안 풀린다.
+
+    예전 문장은 `session_state` 를 보라고 했는데, 수집 계층이 없으면 그 변수부터 읽히지 않는다.
+    """
+    text = _error_text(TwinError(503, {'error': {
+        'code': 'PRECONDITION_FAILED',
+        'message': 'session_control_node is not available; start the collection layer'}}))
+
+    assert 'session_state' not in text
+    assert 'session_control_node' in text          # 무엇이 없는지는 트윈 메시지가 말한다
+
+
+@pytest.mark.parametrize('code,expected', [
+    ('PLANNING_FAILED', '목표나 시작 자세를 바꾼다'),
+    ('EXECUTION_ABORTED', 'ee_pose'),
+    ('PRECONDITION_FAILED', 'session_state'),     # 접수 뒤의 거절은 상태 불일치다
+])
+def test_failed_operation_text_tells_the_agent_how_to_recover(code, expected):
+    exc = OperationFailed('move_linear', {'status': 'FAILED',
+                                          'error': {'code': code, 'message': 'x'}})
+    text = _error_text(exc)
+
+    assert code in text
+    assert expected in text
+
+
+def test_raw_operation_failure_carries_a_hint():
+    """카탈로그에서 자동 생성된 도구도 실패하면 다음 행동이 붙는다."""
+    tools, _ = _tools(failures={'stop_session': 'PRECONDITION_FAILED'})
+
+    result = tools.call('stop_session', {})
+
+    assert result['status'] == 'FAILED'
+    assert 'session_state' in result['why']
+
+
+def test_raw_operation_success_is_returned_untouched():
+    tools, _ = _tools()
+    assert 'why' not in tools.call('stop_session', {})
 
 
 def test_timeout_error_text_points_at_the_robot_state():

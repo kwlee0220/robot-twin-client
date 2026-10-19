@@ -20,10 +20,14 @@ LLM 에이전트가 프로그램을 작성하지 않고 대화만으로 로봇 �
     감추는 이유는 아래 `begin_task` 참고 — 닫는 쪽(`stop_*`)은 복구 수단으로 남긴다.
 
 ``_EXTRA``
-    카탈로그에 없는 것들 — 상태 읽기, 기하 계산, 작업 경계 래퍼.
+    카탈로그에 없는 것들 — 상태 읽기, 기하 계산, 작업 경계 래퍼, peg 도구. peg 도구는
+    트윈이 `fixtures` 변수를 내놓을 때만 연다(``_PEG_TOOLS``).
 
 기하 계산을 도구로 여는 이유는 **쿼터니언 연산을 에이전트에게 시키면 조용히
 틀리기 때문이다.** xyzw/wxyz 순서 하나만 어긋나도 예외 없이 엉뚱한 자세로 간다.
+
+입력은 실행 전에 **그 도구가 내건 스키마로 확인한다**(``TwinTools._validate``). MCP 는
+스키마를 클라이언트에 전달할 뿐 검증하지 않으므로, 여기서 거르지 않으면 범위 위반이 로봇까지 간다.
 """
 
 from __future__ import annotations
@@ -35,12 +39,13 @@ import asyncio
 import json
 import urllib.error
 
+import jsonschema
 import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from .client import RobotTwinClient, TwinError
-from .ops import move_linear_verified, move_to_named_target_verified
+from .client import OperationFailed, RobotTwinClient, TwinError
+from .ops import failure_why, move_linear_verified, move_to_named_target_verified
 from .peg_in_hole import (
     PegInHoleError, move_peg, pick_peg, place_peg, tilt_deg, where_is_peg
 )
@@ -52,6 +57,12 @@ from .pick_n_place import (
 # `stop_session` / `stop_episode` 는 감추지 않는다 — 이전 실행이 남긴 세션을 에이전트가
 # 스스로 정리할 수 있어야 한다.
 _HIDDEN = frozenset({'move_to_pose', 'move_gripper', 'start_session', 'start_episode'})
+
+# peg 도구는 고정물(구멍 · 트레이)의 위치 · 기하를 `fixtures` 상태 변수에서 읽는다. 그 변수가
+# 없는 트윈에서는 **목록에서 뺀다** — 보이게 두면 에이전트가 부르고, 첫 읽기에서 실패한다.
+# 판별은 백엔드 이름이 아니라 **변수 카탈로그**로 한다 (`move_linear` 의 프레임 판별과 같다).
+_PEG_TOOLS = frozenset({'peg_status', 'pick_peg', 'place_peg', 'move_peg'})
+_PEG_REQUIRED_VARIABLE = 'fixtures'
 
 _POSE_SCHEMA = {
     'type': 'object',
@@ -69,6 +80,10 @@ _POSE_SCHEMA = {
         },
     },
 }
+
+
+class InvalidToolInput(ValueError):
+    """도구 입력이 그 도구가 내건 스키마에 맞지 않는다 — 로봇에 닿기 전에 거른다."""
 
 
 def _obj_schema(properties: dict[str, Any], required: Sequence[str] = ()) -> dict[str, Any]:
@@ -90,6 +105,7 @@ class TwinTools:
     def __init__(self, twin: RobotTwinClient) -> None:
         self.twin = twin
         self._catalog: Optional[list[dict[str, Any]]] = None
+        self._variable_names: Optional[frozenset[str]] = None
         # 열린 작업의 재현 정보. `end_task` 가 metadata 에 자동으로 합친다 — 에이전트가
         # 배치를 되돌려 주기를 기대하면 잊는 순간 재현 불가능한 에피소드가 남는다.
         self._task: Optional[dict[str, Any]] = None
@@ -104,6 +120,16 @@ class TwinTools:
             self._catalog = self.twin.operations()
         return self._catalog
 
+    def _variables(self) -> frozenset[str]:
+        """상태 변수 이름. 연산 카탈로그와 같은 이유로 한 번만 읽는다."""
+        if self._variable_names is None:
+            self._variable_names = frozenset(v['name'] for v in self.twin.variables())
+        return self._variable_names
+
+    def _peg_supported(self) -> bool:
+        """이 트윈에서 peg 도구가 동작하는가 — 고정물 변수를 내놓는지로 본다."""
+        return _PEG_REQUIRED_VARIABLE in self._variables()
+
     def list_tools(self) -> list[types.Tool]:
         tools = [
             types.Tool(name=op['name'],
@@ -112,9 +138,11 @@ class TwinTools:
             for op in self._operations()
             if op['name'] not in _HIDDEN and op['name'] not in _OVERRIDES
         ]
+        peg_ok = self._peg_supported()
         tools += [types.Tool(name=name, description=spec['description'],
                              input_schema=spec['schema'])
-                  for name, spec in {**_OVERRIDES, **_EXTRA}.items()]
+                  for name, spec in {**_OVERRIDES, **_EXTRA}.items()
+                  if peg_ok or name not in _PEG_TOOLS]
         return sorted(tools, key=lambda t: t.name)
 
     def _describe(self, op: dict[str, Any]) -> str:
@@ -136,13 +164,48 @@ class TwinTools:
 
     def call(self, name: str, args: dict[str, Any]) -> Any:
         """도구 하나를 실행한다. **블로킹 호출이므로 스레드에서 돈다.**"""
+        if name in _PEG_TOOLS and not self._peg_supported():
+            # 목록에 없는 도구를 이름으로 직접 부른 경우다. 감춘 연산과 같게 거절하되, 왜
+            # 없는지를 알려 준다 — 이 트윈에 고정물이 없으면 peg 작업 자체가 성립하지 않는다.
+            raise LookupError(f"tool '{name}' is not available on this twin: "
+                              f"it exposes no '{_PEG_REQUIRED_VARIABLE}' variable")
+        if name not in _OVERRIDES and name not in _EXTRA and (
+                name in _HIDDEN or not any(op['name'] == name for op in self._operations())):
+            raise LookupError(f"unknown tool '{name}'")
+        # MCP 는 스키마를 **전달할 뿐 검증하지 않는다** — 확인은 서버 몫이다. 트윈도 스키마
+        # 검증을 `jsonschema` 가 있을 때만 하므로, 여기서 거르지 않으면 범위 위반이 로봇까지 간다.
+        self._validate(name, args)
         if name in _OVERRIDES:
             return _OVERRIDES[name]['run'](self, args)
         if name in _EXTRA:
             return _EXTRA[name]['run'](self, args)
-        if name in _HIDDEN or not any(op['name'] == name for op in self._operations()):
-            raise LookupError(f"unknown tool '{name}'")
-        return self.twin.run(name, args)
+        state = self.twin.run(name, args)
+        # 실패면 코드에 맞는 다음 행동을 붙인다 — 세션 상태만 주면 에이전트는 코드를
+        # 읽고도 같은 호출을 다시 부른다.
+        why = failure_why(state) if state.get('status') == 'FAILED' else None
+        return {**state, 'why': why} if why else state
+
+    def _schema_of(self, name: str) -> dict[str, Any]:
+        """도구가 `tools/list` 로 내건 입력 스키마. 목록과 **같은 출처**에서 꺼낸다."""
+        if name in _OVERRIDES:
+            return _OVERRIDES[name]['schema']
+        if name in _EXTRA:
+            return _EXTRA[name]['schema']
+        for op in self._operations():
+            if op['name'] == name:
+                return op['inputs_schema'] or {}
+        return {}
+
+    def _validate(self, name: str, args: dict[str, Any]) -> None:
+        """입력을 스키마로 확인한다. 어긋나면 **아무것도 실행하지 않고** 거절한다."""
+        schema = self._schema_of(name)
+        if not schema:
+            return
+        validator = jsonschema.validators.validator_for(schema)(schema)
+        error = jsonschema.exceptions.best_match(validator.iter_errors(args))
+        if error is not None:
+            where = '.'.join(str(p) for p in error.absolute_path) or '<root>'
+            raise InvalidToolInput(f"invalid input for '{name}' at {where}: {error.message}")
 
     # ----- 상태 -----
 
@@ -176,7 +239,7 @@ class TwinTools:
         state = self.twin.read('session_state')['state']
         if state != 'IDLE':
             # 트윈 재시작 없이 서버만 재시작한 경우 등 — 서버가 모르는 세션이 열려 있다.
-            self.twin.run('stop_session')
+            self.twin.outputs('stop_session')
             warnings.append(f'열려 있던 세션을 닫았다 (이전 상태: {state})')
 
         placement: dict[str, Any] = {}
@@ -186,12 +249,18 @@ class TwinTools:
                 inputs['seed'] = args['seed']
             placement = self.twin.outputs('reset_scene', inputs)
 
-        self.twin.run('start_session', {'task_label': args['task_label']})
+        # **`run` 이 아니라 `outputs` 다** — 세션 연산은 동기라 `run` 은 `FAILED` 를 예외 없이
+        # 돌려주고, 그러면 에피소드가 안 열렸는데 작업이 시작된 것으로 보고된다.
+        self.twin.outputs('start_session', {'task_label': args['task_label']})
         try:
-            self.twin.run('start_episode')
+            self.twin.outputs('start_episode')
         except Exception:
             # 에피소드를 못 열었으면 세션도 남기지 않는다. 반쯤 열린 상태가 가장 나쁘다.
-            self.twin.run('stop_session')
+            # 정리 실패가 원래 사유를 가리면 안 된다.
+            try:
+                self.twin.run('stop_session')
+            except Exception:                          # noqa: BLE001
+                pass
             raise
 
         self._task = {'task_label': args['task_label'],
@@ -211,13 +280,14 @@ class TwinTools:
             for key in ('scene', 'seed', 'objects'):
                 metadata.setdefault(key, self._task[key])
 
+        # `outputs` 로 불러 `FAILED` 도 오류로 센다 — `run` 이면 닫지 못해도 `closed: true` 다.
         errors: list[str] = []
         try:
-            self.twin.run('stop_episode', {'outcome': args['outcome'], 'metadata': metadata})
+            self.twin.outputs('stop_episode', {'outcome': args['outcome'], 'metadata': metadata})
         except Exception as exc:
             errors.append(f'stop_episode: {exc}')
         try:
-            self.twin.run('stop_session')
+            self.twin.outputs('stop_session')
         except Exception as exc:
             errors.append(f'stop_session: {exc}')
 
@@ -409,7 +479,7 @@ _EXTRA: dict[str, dict[str, Any]] = {
             '**반환의 `quality` 를 먼저 본다** — OK 가 아니면 값이 낡았거나 없는 것이라 '
             '그대로 쓰면 안 된다. `reason` 에 사유가 있다.\n\n'
             '자주 쓰는 것: scene_objects(물체 좌표 — 집기 전 반드시), ee_pose(현재 위치), '
-            'gripper_last_command_result(파지 성공 판정), session_state(수집 상태).'),
+            'gripper_state(그리퍼 개구 폭 · 성공 판정은 at_goal), session_state(수집 상태).'),
         'schema': _obj_schema({'name': {'type': 'string'}}, ['name']),
         'run': lambda self, a: self._read_state(a),
     },
@@ -502,7 +572,8 @@ _EXTRA: dict[str, dict[str, Any]] = {
             '작업을 끝낸다 — 에피소드와 세션을 닫고 성패를 기록한다.\n\n'
             '**실패했을 때도 반드시 부른다.** 파지 실패도 유효한 학습 데이터이므로 '
             "outcome='failure' 로 닫는 것이 정상 경로다. 닫지 않고 두면 다음 begin_task 가 "
-            '그 에피소드를 실패로 잘라내고, 그 구간의 데이터는 경계를 잃는다.\n\n'
+            '이 작업을 **failure 로 닫는다** — 실제로 성공했어도 그렇게 기록되고, 기록이 끝난 '
+            '뒤에는 바로잡을 수 없다.\n\n'
             'begin_task 가 배치한 물체·scene·seed 는 서버가 기억했다가 자동으로 합치므로 '
             'metadata 에 다시 넣을 필요가 없다.'),
         'schema': _obj_schema(
@@ -545,13 +616,20 @@ def _error_text(exc: Exception) -> str:
         hint = {
             'RESOURCE_BUSY': ' 같은 자원을 쓰는 연산이 실행 중이다. '
                              'get_resource_status 로 확인하고 끝난 뒤 다시 부른다.',
-            'PRECONDITION_FAILED': ' 현재 상태에서 허용되지 않는 요청이다. '
-                                   "read_state('session_state') 로 상태를 확인한다.",
+            # 세션을 만들기 전의 거절(503)은 **상태 불일치가 아니라 백엔드 부재**다 — 팔
+            # 연산이면 MoveIt, 세션 연산이면 수집 계층(session_control_node). 에이전트가
+            # 띄울 수 있는 것이 아니다. 상태 불일치는 접수 뒤 FAILED 로 온다(아래).
+            'PRECONDITION_FAILED': ' 트윈의 백엔드가 준비되지 않아 아무것도 실행되지 않았다. '
+                                   '메시지에 무엇이 없는지 적혀 있다. 기동 직후라면 잠시 뒤 '
+                                   '한 번 더 부르고, 그래도 같으면 사람에게 알린다.',
             'INVALID_INPUT': ' 입력이 스키마에 맞지 않는다. 메시지에 허용되는 값이 있으면 '
                              '그중에서 고른다.',
             'NOT_FOUND': ' 이름이 존재하지 않는다. list_state_variables 로 확인한다.',
         }.get(exc.code or '', '')
         return f'{exc}{hint}'
+    if isinstance(exc, InvalidToolInput):
+        return (f'{exc}\n\n입력이 도구 스키마에 맞지 않아 **아무것도 실행하지 않았다.** 도구 목록의 '
+                '스키마(필수 인자 · 허용 범위 · 타입)를 다시 보고 고쳐서 부른다.')
     if isinstance(exc, PegInHoleError):
         # **쥔 채로 멈췄는지가 에이전트의 다음 판단을 가른다.** 놓아도 되는 상황과
         # 놓으면 물체를 잃는 상황이 겉보기로 같아서, 말해 주지 않으면 놓아 버린다.
@@ -560,6 +638,11 @@ def _error_text(exc: Exception) -> str:
                     '않는다 — 원인이 그대로면 결과도 같다. 그리퍼를 열면 물체가 씬을 '
                     '이탈해 되돌릴 수 없으므로, 판단이 서지 않으면 **사람에게 알린다.**')
         return f'{exc}\n\n아직 움직이기 전에 멈췄으므로 로봇 상태는 안전하다.'
+    if isinstance(exc, OperationFailed):
+        # 접수 뒤 실패(200/202 + FAILED). 코드가 대응을 가른다 — 특히 계획 실패는 로봇이
+        # 제자리라 목표를 바꿔야 하고, 실행 실패는 위치부터 확인해야 한다.
+        why = failure_why(exc.state)
+        return f'{exc} {why}.' if why else str(exc)
     if isinstance(exc, TimeoutError):
         return (f'{exc} 로봇이 아직 움직이는 중일 수 있다. '
                 "read_state('ee_pose') 로 현재 위치를 확인하고 판단한다.")

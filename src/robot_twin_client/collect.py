@@ -70,7 +70,9 @@ def collect_episode(twin: RobotTwinClient, source_name: str, base_name: str, *,
         return {'ok': False, 'seed': seed, 'placed': placed,
                 'error': f"'{home}' 복귀 실패 — 에피소드를 열지 않는다"}
 
-    twin.run('start_episode')
+    # 세션 경계는 `outputs` 로 부른다 — 동기 연산이라 `run` 은 `FAILED` 를 예외 없이 돌려주고,
+    # 그러면 에피소드가 안 열렸는데 쌓기를 돌려 **데이터 없는 성공**이 기록된다.
+    twin.outputs('start_episode')
     try:
         done = stack(twin, source_name, base_name, home=home, **kwargs)
     except (KeyError, ValueError, TwinError, OperationFailed, TimeoutError) as exc:
@@ -96,8 +98,8 @@ def collect_episode(twin: RobotTwinClient, source_name: str, base_name: str, *,
         metadata['check'] = check
     if failure:
         metadata['error'] = failure
-    twin.run('stop_episode', {'outcome': 'success' if ok else 'failure',
-                              'metadata': metadata})
+    twin.outputs('stop_episode', {'outcome': 'success' if ok else 'failure',
+                                  'metadata': metadata})
 
     result = {'ok': ok, 'seed': seed, 'placed': placed, 'check': check}
     if failure:
@@ -117,7 +119,7 @@ def collect(twin: RobotTwinClient, source_name: str, base_name: str, *, times: i
     `finally` 로 세션을 닫는 것이 요점이다. 중간에 끊겨 세션이 열린 채 남으면 다음
     실행의 `start_session` 이 409 로 거부된다.
     """
-    twin.run('start_session', {'task_label': task_label})
+    twin.outputs('start_session', {'task_label': task_label})
     results = []
     try:
         for index, episode_seed in enumerate(iteration_seeds(seed, times), start=1):
@@ -128,7 +130,7 @@ def collect(twin: RobotTwinClient, source_name: str, base_name: str, *, times: i
             except (KeyError, ValueError, TwinError, OperationFailed, TimeoutError) as exc:
                 result = {'ok': False, 'seed': episode_seed,
                           'error': f'{type(exc).__name__}: {exc}'}
-                print(f"    에피소드를 열지 못했다: {result['error']}")
+                print(f"    에피소드 경계를 처리하지 못했다: {result['error']}")
             result['index'] = index
             results.append(result)
             _describe(result)
@@ -166,12 +168,12 @@ def _close_stale_session(twin: RobotTwinClient) -> None:
     state = twin.read('session_state').get('state')
     if state == 'IN_EPISODE':
         print(f'이전 에피소드가 열려 있다 ({state}) — 닫는다')
-        twin.run('stop_episode', {'outcome': 'failure',
-                                  'metadata': {'error': 'closed by a later collect run'}})
+        twin.outputs('stop_episode', {'outcome': 'failure',
+                                      'metadata': {'error': 'closed by a later collect run'}})
         state = 'IN_SESSION'
     if state == 'IN_SESSION':
         print('이전 세션이 열려 있다 — 닫는다')
-        twin.run('stop_session')
+        twin.outputs('stop_session')
 
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
@@ -226,7 +228,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                           task_label=args.task_label, scene=args.scene, seed=args.seed,
                           clearance_m=args.clearance, gap_m=args.gap, home=args.home)
     except TwinError as exc:
+        # 503 이면 백엔드 부재다 — 세션 연산은 session_control_node(rdfp_collect)가 없을 때다.
         print(f'거절됨: {exc}')
+        return 1
+    except OperationFailed as exc:
+        # 세션을 열거나 닫는 연산이 접수 뒤 거절됐다 — 대개 상태 불일치다.
+        print(f'세션 연산 실패: {exc}')
         return 1
     except KeyboardInterrupt:
         print('\n중단됨 — 세션은 닫았다')

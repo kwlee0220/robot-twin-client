@@ -642,6 +642,7 @@ source = { editable = "." }
 
 [package.optional-dependencies]
 mcp = [
+    { name = "jsonschema" },
     { name = "mcp" },
 ]
 
@@ -651,7 +652,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0" }]
+requires-dist = [
+    { name = "jsonschema", marker = "extra == 'mcp'", specifier = ">=4" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.0" },
+]
 provides-extras = ["mcp"]
 
 [package.metadata.requires-dev]

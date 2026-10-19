@@ -25,6 +25,8 @@ robot-twin-mcp = "robot_twin_client.mcp_server:main"
 # 그 비용을 지지 않게 한다.
 mcp = [
     "mcp>=2.0",
+    # MCP 서버가 도구 입력을 스키마로 확인한다. MCP SDK 도 끌고 오지만 직접 import 하므로 적는다.
+    "jsonschema>=4",
 ]
 
 [build-system]
