@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 import pytest
 
+from robot_twin_client import client as client_module
 from robot_twin_client.client import OperationFailed, RobotTwinClient, TwinError
 
 
@@ -70,6 +71,59 @@ def test_run_raises_timeout_error_instead_of_polling_forever() -> None:
 
     with pytest.raises(TimeoutError, match='move_linear'):
         twin.run('move_linear', {}, poll_sec=0.0, timeout_sec=0.0)
+
+
+def test_polling_timeout_names_the_endpoint_to_cancel() -> None:
+    """기다리기를 그만둘 뿐 연산은 계속된다 — 멈추려면 그 연산 세션을 취소해야 한다."""
+    twin = StubTwin([(202, {'session_endpoint': '/api/v1/sessions/abc'})]
+                    + [(200, {'status': 'RUNNING'})] * 4)
+
+    with pytest.raises(TimeoutError, match='/api/v1/sessions/abc'):
+        twin.run('move_linear', {}, poll_sec=0.0, timeout_sec=0.0)
+
+
+class _Response:
+    status = 200
+
+    def read(self) -> bytes:
+        return b'{}'
+
+    def __enter__(self) -> '_Response':
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+
+def _capture_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    seen: list[float] = []
+
+    def fake_urlopen(req: Any, timeout: float) -> _Response:
+        seen.append(timeout)
+        return _Response()
+
+    monkeypatch.setattr(client_module.urllib.request, 'urlopen', fake_urlopen)
+    return seen
+
+
+def test_http_timeout_outlasts_the_longest_synchronous_operation(monkeypatch) -> None:
+    """동기 연산은 POST 응답이 `sync_timeout_sec` 뒤에 온다 — 펑션베이 그리퍼는 12초다.
+
+    10초였을 때는 트윈이 `COMPLETED` 든 `TIMEOUT` 이든 답하기 전에 클라이언트가 먼저 끊겼다.
+    """
+    seen = _capture_timeouts(monkeypatch)
+
+    RobotTwinClient().health()
+
+    assert seen[0] > 12.0
+
+
+def test_http_timeout_can_be_raised(monkeypatch) -> None:
+    seen = _capture_timeouts(monkeypatch)
+
+    RobotTwinClient(http_timeout_sec=90.0).health()
+
+    assert seen == [90.0]
 
 
 def test_twin_error_exposes_the_error_code() -> None:

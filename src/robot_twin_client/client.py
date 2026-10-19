@@ -1,4 +1,4 @@
-"""로봇 트윈 최소 클라이언트 (사용 설명서 5.2 절).
+"""로봇 트윈 최소 클라이언트 (사용자 가이드 5.2 절).
 
 표준 라이브러리만 쓴다. ROS 가 필요 없다.
 """
@@ -61,9 +61,13 @@ class RobotTwinClient:
     """
 
     def __init__(self, host: str = '127.0.0.1', port: int = 8801,
-                 twin_id: str = 'panda01') -> None:
+                 twin_id: str = 'panda01', *, http_timeout_sec: float = 30.0) -> None:
         self.base = f'http://{host}:{port}/api/v1/robot_twins/{twin_id}'
         self.root = f'http://{host}:{port}'
+        # **동기 연산의 `sync_timeout_sec` 보다 길어야 한다** — POST 응답이 그 뒤에 온다.
+        # 10초였을 때 펑션베이 그리퍼(12초)와 `reset_scene`(10초)에서 트윈이 결과를 주기
+        # 전에 클라이언트가 소켓 시간 초과로 먼저 끊겼다. 동작은 서버에서 계속된다.
+        self.http_timeout_sec = http_timeout_sec
 
     # ----- 저수준 -----
     def _request(self, path: str, method: str = 'GET',
@@ -73,7 +77,7 @@ class RobotTwinClient:
         headers = {'Content-Type': 'application/json'} if data else {}
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=10) as res:
+            with urllib.request.urlopen(req, timeout=self.http_timeout_sec) as res:
                 raw = res.read()
                 return res.status, (json.loads(raw) if raw else None)
         except urllib.error.HTTPError as exc:
@@ -135,7 +139,9 @@ class RobotTwinClient:
             if state['status'] != 'RUNNING':
                 return state
             if time.monotonic() > deadline:
-                raise TimeoutError(f"'{operation}' did not finish in {timeout_sec}s")
+                # **취소하지 않는다** — 기다리기를 그만둘 뿐 로봇은 계속 움직인다. 멈추려면
+                # 메시지의 endpoint 로 `cancel()` 한다. 트윈의 워치독은 따로 돈다.
+                raise TimeoutError(f"'{operation}' did not finish in {timeout_sec}s: {endpoint}")
             time.sleep(poll_sec)
 
     def outputs(self, operation: str, inputs: Optional[dict] = None, **kwargs) -> dict:
