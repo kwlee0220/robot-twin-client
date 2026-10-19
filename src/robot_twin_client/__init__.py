@@ -1,6 +1,6 @@
 """로봇 트윈 HTTP 클라이언트와 pick-and-place 시퀀스 예제.
 
-`rdfp` 워크스페이스의 `docs/twin/robot_twin_user_guide.md` 5.9 절 예제를
+`rdfp` 워크스페이스의 `docs/twin/로봇_트윈_사용자_가이드.md` 5.9 절 예제를
 독립 프로젝트로 옮긴 것이다. 트윈은 HTTP 로만 접근하므로 ROS 가 필요 없다.
 
 `mcp_server` 는 **여기서 import 하지 않는다** — `mcp` extra 를 설치하지 않은 환경에서

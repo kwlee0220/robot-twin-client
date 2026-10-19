@@ -3,7 +3,7 @@
 로봇 트윈 HTTP API 클라이언트, **pick-and-place 시퀀스 예제**, 그리고 로봇을 LLM
 에이전트에게 노출하는 **MCP 서버**.
 
-`rdfp` 워크스페이스 문서 `docs/twin/robot_twin_user_guide.md` 의 5.9 절 예제를
+`rdfp` 워크스페이스 문서 `docs/twin/로봇_트윈_사용자_가이드.md` 의 5.9 절 예제를
 독립 실행 가능한 프로젝트로 옮긴 것이다. 트윈은 HTTP 로만 접근하므로 **ROS 설치도
 `source install/setup.bash` 도 필요 없다.** 클라이언트와 예제는 표준 라이브러리만
 쓰고, MCP 서버만 `mcp` extra 를 요구한다.
@@ -63,7 +63,17 @@ require_grasp=False)`) 로 건너뛴다 — 경고를 찍고 진행한다. **실
 `move_to_named_target` 의 목표 관절값은 SRDF 안에 있어 클라이언트가 모른다. 그래서
 `closed_loop: false` 일 때는 좌표로 검증할 방법이 없어 `reached=False` 와 `why` 를
 돌려주고 판단을 호출자에게 넘긴다. 쓸 수 있는 이름은 `twin.read('named_targets')`
-로 먼저 확인한다 — 오타는 `400` 이 아니라 계획 단계의 `FAILED` 로 온다.
+로 먼저 확인한다 — 오타는 `400` 이 아니라 접수 뒤 `FAILED` + `EXECUTION_ABORTED`
+(메시지에 `not found in group … Available: […]`)로 온다.
+
+**실패로 끝난 이동은 `why` 에 다음에 할 일을 싣는다.** 트윈이 계획 실패와 실행 실패를
+코드로 갈라 주고(`ops.FAILURE_HINTS` 가 코드별 문장을 갖는다) 둘은 대응이 정반대다.
+
+| `error.code` | 로봇 | 할 일 |
+|---|---|---|
+| `PLANNING_FAILED` | 움직이지 않았다 | 같은 목표로는 결과가 같다 — 목표나 시작 자세를 바꾼다 |
+| `EXECUTION_ABORTED` | 경로 중간일 수 있다 | `ee_pose` 로 위치부터 확인한다 |
+| `TIMEOUT` | 아직 움직이는 중일 수 있다 | `ee_pose` 로 위치부터 확인한다 |
 
 ### 좌표는 손끝(TCP) 기준이다
 
@@ -95,7 +105,7 @@ uv sync
 
 ## 실행
 
-먼저 로봇 스택과 트윈이 떠 있어야 한다 (사용 설명서 1.2 / 1.3).
+먼저 로봇 스택과 트윈이 떠 있어야 한다 (사용자 가이드 1.2 / 1.3).
 
 ```bash
 uv run robot-twin-pick --help
@@ -144,7 +154,7 @@ from robot_twin_client import (
 
 twin = RobotTwinClient(host='127.0.0.1', port=8801, twin_id='panda01')
 
-placement = twin.run('reset_scene', {'scene': 'one_cube', 'seed': 7})['outputs']
+placement = twin.outputs('reset_scene', {'scene': 'one_cube', 'seed': 7})   # 실패면 OperationFailed
 grasp = grasp_pose_of(placement['objects'][0])   # 배치된 물체를 집는다
 target = rotated_about_base_z(grasp, 30.0)       # 반시계 30°
 
@@ -484,7 +494,7 @@ Claude Code 에서는 `/mcp` 에 보이면 된다. peg 작업은 `peg_in_hole` �
 | `pose_above` / `pose_rotated_about_base_z` / `grasp_pose_of_object` | **좌표 계산.** 로봇을 움직이지 않는다 |
 | `begin_task` / `end_task` | 씬 리셋 + 세션/에피소드 경계 |
 | `emergency_stop` / `release_emergency_stop` | 비상 정지 |
-| `peg_status` / `pick_peg` / `place_peg` / `move_peg` | **peg-in-hole 절차.** 좌표를 만들지 않는다 — 보정·판정이 도구 안에서 일어난다 |
+| `peg_status` / `pick_peg` / `place_peg` / `move_peg` | **peg-in-hole 절차.** 좌표를 만들지 않는다 — 보정·판정이 도구 안에서 일어난다. 트윈이 `fixtures` 변수를 내놓을 때만(펑션베이) 목록에 나온다 — mock · Isaac 에는 고정물이 없어 뺀다 |
 
 **기하 계산을 도구로 여는 이유는 쿼터니언을 에이전트에게 맡기면 조용히 틀리기
 때문이다.** xyzw/wxyz 순서 하나만 어긋나도 예외 없이 엉뚱한 자세로 간다. "50도
@@ -506,13 +516,34 @@ end_task   ─ stop_episode ─ stop_session      ← 한쪽이 실패해도 나
   에이전트가 되돌려 주기를 기대하면 잊는 순간 재현 불가능한 에피소드가 남는다.
 - 닫지 않은 채 새 작업을 시작하면 이전 것을 `failure` 로 닫고 경고한다. 연결이
   끊겨도 종료 경로에서 닫는다.
+- 세션 연산이 거절되면 `begin_task` 는 오류로 끝나고(세션을 반쯤 열린 채 남기지 않는다)
+  `end_task` 는 `closed: false` 와 `errors` 를 돌려준다. 세션 연산은 동기라 `run` 은
+  거절(`FAILED`)을 예외 없이 돌려주므로, 경계는 `outputs` 로 부른다 —
+  `robot-twin-collect` 도 같다.
 
 ### 오류는 복구 방법과 함께 돌아온다
 
 오류 메시지가 에이전트의 유일한 피드백 채널이라, 코드만 던지면 같은 호출을 그대로
-재시도한다. `RESOURCE_BUSY` → "`get_resource_status` 로 확인하라",
-`PRECONDITION_FAILED` → "`session_state` 를 확인하라" 처럼 다음 행동을 붙인다.
-도구 실패는 예외가 아니라 `is_error` 결과로 돌아가므로 세션이 끊기지 않는다.
+재시도한다. `RESOURCE_BUSY` → "`get_resource_status` 로 확인하라" 처럼 다음 행동을 붙인다.
+도구 실패는 프로토콜 오류가 아니라 `is_error` 결과로 돌아가 에이전트가 읽고 고칠 수 있다.
+
+**입력은 실행 전에 스키마로 확인한다.** MCP 는 스키마를 클라이언트에 전달할 뿐 검증하지 않고,
+트윈도 `jsonschema` 가 있을 때만 검증하므로 서버가 거른다 — 범위 밖 값(`velocity_scaling: 2.0`)이나
+빠진 필수 인자는 **아무것도 실행하지 않고** `is_error` 로 돌아간다.
+
+⚠️ **`is_error: false` 는 로봇 작업의 성공이 아니다.** 연산이 `FAILED` 로 끝나도, 이동이 목표에
+못 갔어도(`reached: false`), 경계를 못 닫았어도(`closed: false`) 결과는 정상 응답으로 온다 —
+결과 안의 판정 필드를 본다(`rdfp_ws/docs/twin/로봇_트윈_MCP_서버_설계서.md` §3 「호출 · 결과 계약」).
+
+같은 `PRECONDITION_FAILED` 라도 오는 자리에 따라 뜻이 다르다.
+
+| 자리 | 뜻 | 붙이는 행동 |
+|---|---|---|
+| `503` (세션을 만들기 전) | **백엔드 부재** — 팔 연산이면 MoveIt, 세션 연산이면 `session_control_node` | 기동 직후면 한 번 더, 그래도 같으면 사람에게 알린다 |
+| 접수 뒤 `FAILED` | **상태 불일치** (`IDLE` 에서 `start_episode` 등) | `session_state` 를 확인하고 상태를 맞춘다 |
+
+접수 뒤 실패는 코드별 다음 행동(`why`, 정본은 `ops.FAILURE_HINTS`)이 붙는다 — 카탈로그에서
+자동 생성된 도구도 같다.
 
 > **팔 이동은 수십 초가 걸린다.** 블로킹 HTTP 호출을 스레드로 내리므로 이동 중에도
 > 상태 조회가 응답한다. 다만 MCP 클라이언트 쪽 타임아웃은 별개이니, 긴 연산이 잦으면
