@@ -56,3 +56,54 @@ def test_main_reports_a_refused_session_instead_of_crashing(monkeypatch, capsys)
 
     assert collect.main(['--repeat', '1']) == 1
     assert 'PRECONDITION_FAILED' in capsys.readouterr().out
+
+
+def test_main_refuses_a_twin_of_another_environment(monkeypatch, capsys) -> None:
+    """트윈은 환경과 무관하게 같은 id · 포트라 mock 트윈에도 연결은 된다 — 메타로 거른다."""
+    twin = FakeTwin(backend='panda_mock')
+    twin.health = lambda: {'move_group': 'READY', 'variables': {'session_state': 'OK'}}
+    monkeypatch.setattr(collect, 'RobotTwinClient', lambda **kwargs: twin)
+
+    assert collect.main(['--repeat', '1']) == 1
+    assert 'panda_mock' in capsys.readouterr().out
+    assert twin.calls == []                      # 세션도 안 열었다
+
+
+# ----- 기록된 에피소드 수와 종료 코드 (2026-10-23) ----------------------------
+#
+# 회차 수 = 기록된 에피소드 수가 아니다. 예전에는 늘 "N 건 모두 기록됐다"를 찍고 0 으로
+# 끝나, 리셋 · 복귀 · 경계 요청이 실패해 에피소드가 빠진 회차가 보이지 않았다.
+
+def _main_with(monkeypatch, results):
+    twin = FakeTwin(session_state='IDLE')
+    twin.health = lambda: {'move_group': 'READY', 'variables': {'session_state': 'OK'}}
+    monkeypatch.setattr(collect, 'RobotTwinClient', lambda **kwargs: twin)
+    monkeypatch.setattr(collect, '_close_stale_session', lambda twin: None)
+    monkeypatch.setattr(collect, 'collect', lambda *a, **kw: results)
+    return collect.main(['--repeat', str(len(results))])
+
+
+def test_failed_task_episodes_still_exit_zero(monkeypatch, capsys) -> None:
+    """작업 실패 에피소드는 정상적인 학습 데이터다."""
+    results = [{'ok': True, 'seed': 1, 'episode': True},
+               {'ok': False, 'seed': 2, 'episode': True, 'error': 'not stacked'}]
+    assert _main_with(monkeypatch, results) == 0
+    assert '에피소드 2 건 기록, 작업 성공 1 건' in capsys.readouterr().out
+
+
+def test_rounds_without_an_episode_exit_one_and_are_named(monkeypatch, capsys) -> None:
+    results = [{'ok': True, 'seed': 1, 'episode': True},
+               {'ok': False, 'seed': 2, 'episode': False, 'error': "'ready' 복귀 실패"}]
+    assert _main_with(monkeypatch, results) == 1
+    out = capsys.readouterr().out
+    assert '에피소드 1 건 기록' in out
+    assert '에피소드를 남기지 못한 회의 seed: 2' in out
+
+
+def test_home_failure_leaves_no_episode(monkeypatch) -> None:
+    """복귀에 실패하면 경계를 열지 않는다 — 그 회차는 에피소드가 없다고 표시한다."""
+    monkeypatch.setattr(collect, 'return_home', lambda twin, home: False)
+    twin = FakeTwin()
+    result = collect.collect_episode(twin, 'cube_0', 'cube_0')
+    assert result['episode'] is False
+    assert 'start_episode' not in _ops(twin)

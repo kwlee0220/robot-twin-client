@@ -7,19 +7,23 @@ from typing import Any, Optional
 import pytest
 
 from robot_twin_client import client as client_module
-from robot_twin_client.client import OperationFailed, RobotTwinClient, TwinError
+from robot_twin_client.client import DEFAULT_BASE_URL, OperationFailed, RobotTwinClient, TwinError
 
 
 class StubTwin(RobotTwinClient):
-    """`_request` 만 응답표로 대체한 클라이언트."""
+    """`_send` 만 응답표로 대체한 클라이언트.
 
-    def __init__(self, responses: list[tuple[int, Any]]) -> None:
-        super().__init__()
+    트윈 기준 요청은 상대 경로로, 그 밖(세션 폴링)은 URL 그대로 기록한다.
+    """
+
+    def __init__(self, responses: list[tuple[int, Any]], base_url: str = DEFAULT_BASE_URL) -> None:
+        super().__init__(base_url)
         self._responses = list(responses)
         self.requests: list[tuple[str, str, Optional[dict]]] = []
 
-    def _request(self, path: str, method: str = 'GET',
-                 body: Optional[dict] = None) -> tuple[int, Any]:
+    def _send(self, url: str, method: str = 'GET',
+              body: Optional[dict] = None) -> tuple[int, Any]:
+        path = url[len(self.base):] if url.startswith(self.base) else url
         self.requests.append((path, method, body))
         return self._responses.pop(0)
 
@@ -62,7 +66,7 @@ def test_run_polls_the_session_until_it_leaves_running() -> None:
     result = twin.run('move_to_named_target', {'target': 'ready'}, poll_sec=0.0)
 
     assert result['status'] == 'COMPLETED'
-    assert twin.requests[-1][0] == twin.root + '/api/v1/sessions/abc'
+    assert twin.requests[-1][0] == 'http://127.0.0.1:8801/api/v1/sessions/abc'
 
 
 def test_run_raises_timeout_error_instead_of_polling_forever() -> None:
@@ -205,3 +209,99 @@ def test_outputs_treats_a_missing_outputs_key_as_empty() -> None:
     twin = _StubTwin({'status': 'COMPLETED'})
 
     assert twin.outputs('stop_session') == {}
+
+
+# ----- 환경 확인 --------------------------------------------------------------
+#
+# 출하 트윈은 환경마다 id 가 다르다 (2026-10-25 — `rdfp01` · `panda01` · `mock01`). 기본
+# 접속 대상은 펑션베이 트윈이고, 환경은 id 가 아니라 트윈 메타의 `backend` 로 안다.
+
+def test_default_target_is_the_functionbay_twin() -> None:
+    assert RobotTwinClient().base == 'http://127.0.0.1:8801/api/v1/robot_twins/rdfp01'
+
+
+# ----- 접속 URL ---------------------------------------------------------------
+
+@pytest.mark.parametrize('url, root', [
+    ('http://127.0.0.1:8801', 'http://127.0.0.1:8801'),
+    ('http://127.0.0.1:8801/', 'http://127.0.0.1:8801'),
+    ('https://twin.example', 'https://twin.example'),
+    ('http://[::1]:8801', 'http://[::1]:8801')
+])
+def test_base_url_is_the_server_root(url: str, root: str) -> None:
+    twin = RobotTwinClient(url, 'panda02')
+
+    assert twin.base_url == root
+    assert twin.base == f'{root}/api/v1/robot_twins/panda02'
+
+
+@pytest.mark.parametrize('url', [
+    '127.0.0.1:8801',
+    'localhost:8801',
+    'ftp://127.0.0.1:8801',
+    'http://',
+    'http://127.0.0.1:abc'
+])
+def test_base_url_without_a_usable_scheme_and_host_is_refused(url: str) -> None:
+    """스킴을 빠뜨린 주소는 생성할 때 거부한다 — 첫 호출의 `unknown url type` 보다 낫다."""
+    with pytest.raises(ValueError):
+        RobotTwinClient(url)
+
+
+@pytest.mark.parametrize('url', [
+    'https://gw.example/twin',
+    'http://127.0.0.1:8801/api/v1/robot_twins/panda01',
+    'http://127.0.0.1:8801/?x=1'
+])
+def test_base_url_with_a_path_is_refused(url: str) -> None:
+    """트윈이 세션 endpoint 를 접두사 없는 절대 경로로 주므로 접두사가 붙으면 폴링이 깨진다."""
+    with pytest.raises(ValueError, match='without a path'):
+        RobotTwinClient(url)
+
+
+def test_session_polling_and_cancel_go_to_the_server_root_over_https() -> None:
+    twin = StubTwin([
+        (202, {'session_endpoint': '/api/v1/sessions/abc'}),
+        (200, {'status': 'COMPLETED', 'outputs': {}}),
+        (200, {'status': 'CANCELED'})
+    ], base_url='https://twin.example')
+
+    twin.run('move_linear', {}, poll_sec=0.0)
+    twin.cancel('/api/v1/sessions/abc')
+
+    assert [r[:2] for r in twin.requests] == [
+        ('/operations/move_linear', 'POST'),
+        ('https://twin.example/api/v1/sessions/abc', 'GET'),
+        ('https://twin.example/api/v1/sessions/abc', 'DELETE')
+    ]
+
+
+def test_meta_reads_the_twin_resource_itself() -> None:
+    twin = StubTwin([(200, {'id': 'panda01', 'backend': 'panda_isaac'})])
+
+    assert twin.meta()['backend'] == 'panda_isaac'
+    assert twin.requests == [('', 'GET', None)]
+
+
+def test_require_backend_returns_the_matching_name() -> None:
+    twin = StubTwin([(200, {'id': 'panda01', 'backend': 'panda_isaac'})])
+
+    assert client_module.require_backend(twin, 'panda_isaac', purpose='쌓기') == 'panda_isaac'
+
+
+def test_require_backend_names_both_sides_when_the_environment_differs() -> None:
+    twin = StubTwin([(200, {'id': 'panda01', 'backend': 'panda_mock'})])
+
+    with pytest.raises(client_module.WrongBackend) as exc:
+        client_module.require_backend(twin, 'panda_isaac', purpose='쌓기')
+    assert exc.value.actual == 'panda_mock'
+    assert 'panda_isaac' in str(exc.value) and 'panda_mock' in str(exc.value)
+    assert '--backend panda_isaac' in str(exc.value)
+
+
+def test_require_backend_rejects_a_twin_that_does_not_say() -> None:
+    """옛 트윈은 메타에 `backend` 가 없다 — 모르는 것을 맞다고 치지 않는다."""
+    twin = StubTwin([(200, {'id': 'panda01'})])
+
+    with pytest.raises(client_module.WrongBackend, match='옛 트윈'):
+        client_module.require_backend(twin, 'panda_isaac', purpose='쌓기')

@@ -4,7 +4,7 @@
 #
 #   ./sbin/register_mcp_server.sh                      # 기본 (user scope — 모든 프로젝트)
 #   ./sbin/register_mcp_server.sh --scope local        # 이 프로젝트에서만
-#   ./sbin/register_mcp_server.sh --port 8802 --name robot-twin-02
+#   ./sbin/register_mcp_server.sh --url http://127.0.0.1:8802 --twin-id panda02 --name robot-twin-02   # 다른 로봇
 #   ./sbin/register_mcp_server.sh --remove             # 등록 해제
 #
 # **덮어쓰기다.** 같은 이름이 있으면 지우고 다시 넣으므로, 인자를 바꿔 다시
@@ -19,17 +19,15 @@ name='robot-twin'
 # 기본을 user 로 둔다. local 은 **등록할 때의 프로젝트 디렉터리에서만** 잡히는데,
 # 로봇 작업은 보통 rdfp_ws 쪽에서 하므로 거기서 도구가 보이지 않는다.
 scope='user'
-host='127.0.0.1'
-port='8801'
-twin_id='panda01'
+url='http://127.0.0.1:8801'
+twin_id='rdfp01'   # 펑션베이 트윈. Isaac 은 --twin-id panda01
 remove_only='false'
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --name)     name="$2";    shift 2 ;;
         --scope)    scope="$2";   shift 2 ;;
-        --host)     host="$2";    shift 2 ;;
-        --port)     port="$2";    shift 2 ;;
+        --url)      url="$2";     shift 2 ;;
         --twin-id)  twin_id="$2"; shift 2 ;;
         --remove)   remove_only='true'; shift ;;
         -h|--help)  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
@@ -63,7 +61,7 @@ echo "syncing dependencies (--extra mcp) ..."
 
 claude mcp add "$name" --scope "$scope" -- \
     "$uv_bin" --directory "$root" run --extra mcp robot-twin-mcp \
-    --host "$host" --port "$port" --twin-id "$twin_id"
+    --url "$url" --twin-id "$twin_id"
 
 echo
 claude mcp get "$name" || true

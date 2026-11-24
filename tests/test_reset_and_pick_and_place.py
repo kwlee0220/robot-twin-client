@@ -10,9 +10,9 @@ import argparse
 
 import pytest
 
-from robot_twin_client.pick_n_place import (
-    TCP_OFFSET_M, grasp_pose_of, reset_and_pick_and_place
-)
+from robot_twin_client.geometry import grasp_pose_of
+from robot_twin_client.panda_hand import TCP_OFFSET_M
+from robot_twin_client.pick_n_place import reset_and_pick_and_place
 
 from conftest import SCENE_OBJECTS, FakeTwin
 
@@ -143,3 +143,14 @@ def test_empty_scene_aborts_before_moving() -> None:
     assert reset_and_pick_and_place(twin, _args()) is False
 
     assert _ops(twin) == ['reset_scene']
+
+
+def test_pick_cli_refuses_a_twin_that_resolves_frames_itself(monkeypatch, capsys) -> None:
+    """Panda Hand 보정을 쓰므로 펑션베이 트윈에서는 움직이기 전에 멈춘다(보정 이중 → 약 10 cm)."""
+    from robot_twin_client import pick_n_place
+    twin = FakeTwin(backend='panda_functionbay')
+    twin.health = lambda: {'move_group': 'READY'}
+    monkeypatch.setattr(pick_n_place, 'RobotTwinClient', lambda **kwargs: twin)
+    assert pick_n_place.main([]) == 1
+    assert twin.calls == []
+    assert 'panda_functionbay' in capsys.readouterr().out

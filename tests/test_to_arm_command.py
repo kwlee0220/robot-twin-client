@@ -12,10 +12,9 @@ import math
 import pytest
 
 from conftest import SCENE_OBJECTS
-from robot_twin_client.pick_n_place import (
-    DOWN, TCP_OFFSET_M, _quat_mul, above_of, grasp_pose_of, rotated_about_base_z,
-    to_arm_command
-)
+from robot_twin_client.geometry import (DOWN, above_of, grasp_pose_of, quat_mul,
+                                        rotated_about_base_z)
+from robot_twin_client.panda_hand import TCP_OFFSET_M, to_arm_command
 
 # URDF `panda_hand_joint` — link8 에서 hand 로 가는 회전. 명령을 되돌릴 때 쓴다.
 _LINK8_TO_HAND = {'x': 0.0, 'y': 0.0,
@@ -24,7 +23,7 @@ _LINK8_TO_HAND = {'x': 0.0, 'y': 0.0,
 
 def _hand_orientation_of(command: dict) -> dict:
     """link8 명령에 URDF 변환을 적용해 실제 손 자세를 복원한다."""
-    return _quat_mul(command['orientation'], _LINK8_TO_HAND)
+    return quat_mul(command['orientation'], _LINK8_TO_HAND)
 
 
 def test_down_grasp_raises_the_command_by_the_tcp_offset():

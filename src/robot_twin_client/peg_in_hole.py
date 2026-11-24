@@ -38,7 +38,9 @@ import argparse
 import math
 import time
 
-from .client import OperationFailed, RobotTwinClient
+from .client import DEFAULT_BASE_URL, OperationFailed, RobotTwinClient
+# `down_with_yaw` 는 기반 층에 있다(예전에는 여기 같은 식의 사본이 있었다). `__all__` 로 다시 내보낸다.
+from .geometry import down_with_yaw
 from .ops import move_linear_verified, move_to_named_target_verified, set_gripper
 
 OBJECT = 'peg'
@@ -108,17 +110,6 @@ class PegInHoleError(RuntimeError):
 
 
 # ---------------------------------------------------------------- 기하 헬퍼
-
-
-def down_with_yaw(yaw_rad: float) -> dict:
-    """접근축이 **정확히 연직 하향**인 자세를 z 둘레로 `yaw_rad` 돌린 것.
-
-    ⚠️ **자세는 절대값으로 만든다 — 현재 자세를 읽어 다음 목표로 주면 안 된다.**
-    처짐은 위치만이 아니라 자세도 틀어놓으므로 그 오차가 지워지지 않고 쌓인다.
-    실측(2026-09-09): 그렇게 16회 이동했더니 접근축이 연직에서 **22.3° 기울었다.**
-    """
-    half = yaw_rad / 2.0
-    return {'x': math.cos(half), 'y': math.sin(half), 'z': 0.0, 'w': 0.0}
 
 
 def _pose(x: float, y: float, z: float) -> dict:
@@ -341,7 +332,8 @@ def _go(twin: RobotTwinClient, x: float, y: float, z: float, *, velocity_scaling
         raise PegInHoleError(
             f"move_linear 이 실패했다: {check['result'].get('status')} "
             f"({check['result'].get('error') or check['result'].get('detail')})")
-    if require_reached and not check.get('reached'):
+    if check.get('reason') == 'SETTLE_TIMEOUT' or (require_reached and not check.get('reached')):
+        # 접촉 구간의 위치 오차 허용은 정착 확인 실패까지 허용하는 것이 아니다.
         # **여기서 멈추는 것이 중요하다.** 못 간 자리를 도달한 것으로 알고 다음 목표를
         # 만들면 그 오차가 그대로 실린다 — 정렬이 틀어지면 peg 이 입구에서 기운다.
         raise PegInHoleError(
@@ -593,16 +585,23 @@ def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description='peg 을 다른 고정물로 옮겨 꽂는다')
     parser.add_argument('destination', nargs='?', default=None,
                         help='목적지 고정물 이름. 생략하면 반대쪽')
-    parser.add_argument('--host', default='127.0.0.1')
-    parser.add_argument('--port', type=int, default=8803)
-    parser.add_argument('--twin', default='panda_functionbay')
+    parser.add_argument('--url', default=DEFAULT_BASE_URL,
+                        help='트윈 서버 루트 URL (http(s)://호스트[:포트])')
+    parser.add_argument('--twin', default='rdfp01', help='펑션베이 트윈의 id')
     parser.add_argument('--dry-run', action='store_true',
                         help='판단만 하고 움직이지 않는다')
     parser.add_argument('--no-home', action='store_true',
                         help='시작·끝의 ready 복귀를 생략한다')
     args = parser.parse_args(argv)
 
-    twin = RobotTwinClient(host=args.host, port=args.port, twin_id=args.twin)
+    twin = RobotTwinClient(base_url=args.url, twin_id=args.twin)
+    # 고정물은 펑션베이 트윈만 낸다. id 는 설정에서 바꿀 수 있어 환경 판정의 근거가 못 되므로
+    # **능력(`fixtures` 변수)으로** 확인한다 — MCP 의 peg 도구와 같은 기준이다.
+    meta = twin.meta()
+    if 'fixtures' not in meta.get('variables', []):
+        print(f"이 트윈은 고정물(`fixtures` 변수)을 내지 않는다 (backend: {meta.get('backend')}) — "
+              '펑션베이 트윈이 필요하다: ./scripts/run_robot_twin.sh --backend panda_functionbay')
+        return 1
     try:
         obj, fixtures, source = where_is_peg(twin)
         destination = args.destination or other_fixture(fixtures, source)

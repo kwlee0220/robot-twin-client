@@ -24,8 +24,10 @@
 치수가 없다.
 
 **물리가 있는 백엔드가 필요하다.** mock 은 물체가 서로 얹히지 않아 "쌓았다"를 확인할
-수 없다 — 그래서 기본 접속 대상이 `pick_n_place`(mock, 8801/panda01) 와 달리
-Isaac 트윈(8802/panda_isaac)이다.
+수 없다 — 그래서 붙은 트윈이 Isaac(`backend: panda_isaac`)이 아니면 시작하지 않는다.
+`--twin-id` 기본값은 Isaac 트윈의 id `panda01` 이지만, id 는 설정에서 바꿀 수 있어 환경
+판정의 근거가 못 되므로 트윈 메타로 확인한다(`require_backend`). mock 에서 시퀀스만 디버그하려면
+`--any-backend` 로 끈다(그때는 `--twin-id mock01` 도 준다).
 
 **반복 실행** — `--repeat N` 을 주면 N 번 돈다. 매 회 시작 전에 `home` 으로 가고
 씬을 새로 배치하며, 씨앗은 회마다 다르다(`--seed` 를 주면 그것에서 파생해 실행 전체가
@@ -50,14 +52,15 @@ import random
 import time
 import urllib.error
 
-from .client import OperationFailed, RobotTwinClient, TwinError
+from .client import (DEFAULT_BASE_URL, OperationFailed, RobotTwinClient, TwinError, WrongBackend,
+                     require_backend)
 # `center_of` 는 물체의 두 모양(reset_scene 의 flat / scene_objects 의 nested)을 모두 받는다.
 # 여기 있던 nested 전용 복사본을 걷고 그것을 쓴다 — 두 모듈이 다른 모양을 전제하면
 # 한쪽에서 읽은 물체를 다른 쪽에 넘길 때 KeyError 가 난다.
 from .ops import set_gripper
-from .pick_n_place import (
-    DOWN, center_of, grasp_pose_of, pick, place, return_home, tcp_from_arm_pose
-)
+from .geometry import DOWN, center_of, grasp_pose_of
+from .panda_hand import tcp_from_arm_pose
+from .pick_n_place import pick, place, return_home
 
 
 # 받침 상면과 얹는 물체 사이에 두는 틈(m). 0 으로 딱 맞추면 접촉이 먼저 나서
@@ -356,10 +359,12 @@ def verify_stacked(twin: RobotTwinClient, source_name: str, base_name: str, *,
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description='Pick one scene object and stack it on top of another')
-    # 기본값이 `pick_n_place` 와 다르다 — 쌓기는 물리가 있어야 뜻이 있다 (모듈 설명 참조).
-    parser.add_argument('--host', default='127.0.0.1')
-    parser.add_argument('--port', type=int, default=8802)
-    parser.add_argument('--twin-id', default='panda_isaac')
+    parser.add_argument('--url', default=DEFAULT_BASE_URL,
+                        help='트윈 서버 루트 URL (http(s)://호스트[:포트])')
+    parser.add_argument('--twin-id', default='panda01', help='Isaac 트윈의 id')
+    # 쌓기는 물리가 있어야 뜻이 있다 (모듈 설명 참조) — 확인을 끄는 것은 디버그 전용이다.
+    parser.add_argument('--any-backend', action='store_true',
+                        help='Isaac 트윈인지 확인하지 않는다 — mock 에서 시퀀스만 디버그할 때')
     # **블록을 실린더 위에 얹는 것이 기본이다.** 받침이 원기둥이라 접촉면이 좁고
     # 얹는 쪽은 평평한 바닥이라, 반대 조합(실린더를 블록 위)보다 성립 조건이 까다롭다 —
     # 쌓기 정확도를 보는 데는 이쪽이 더 말이 된다. 뒤집으려면 두 인자를 바꿔 준다.
@@ -393,7 +398,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    twin = RobotTwinClient(host=args.host, port=args.port, twin_id=args.twin_id)
+    twin = RobotTwinClient(base_url=args.url, twin_id=args.twin_id)
 
     try:
         health = twin.health()
@@ -404,6 +409,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if health['move_group'] != 'READY':
         print(f"move_group 미준비: {health.get('move_group_error')}")
         return 1
+    if not args.any_backend:
+        try:
+            require_backend(twin, 'panda_isaac', purpose='쌓기')
+        except WrongBackend as exc:
+            print(f'{exc} (mock 에서 시퀀스만 디버그하려면 --any-backend)')
+            return 1
 
     if args.repeat < 1:
         print('--repeat 은 1 이상이어야 한다')
@@ -430,8 +441,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.no_reset:
             ok = stack(twin, args.source, args.base, **common)
         else:
+            # 반복과 같은 규칙으로 seed 를 정한다 — 생략하면 무작위로 뽑아 알려 준다. 예전에는
+            # `None` 을 그대로 보내 트윈의 `reset_scene` 스키마(seed: integer)에 거부될 수 있었다.
+            seed = iteration_seeds(args.seed, 1)[0]
+            if args.seed is None:
+                print(f'seed={seed} (재현하려면 --seed {seed})')
             ok = reset_and_stack(twin, args.source, args.base,
-                                 scene=args.scene, seed=args.seed, **common)
+                                 scene=args.scene, seed=seed, **common)
     except (KeyError, ValueError) as exc:
         print(f'대상이 잘못되었다: {exc}')
         return 1

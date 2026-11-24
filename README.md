@@ -20,13 +20,23 @@
 > `robot-twin-pick`, `robot-twin-stack`, `robot-twin-peg`). 충돌하지 않고, 등록 이름을
 > 바꾸면 이미 등록된 `claude mcp get robot-twin` 이 끊긴다.
 
+## 문서
+
+| 문서 | 내용 |
+|---|---|
+| [RobotTwinClient 가이드](docs/RobotTwinClient_가이드.md) | 기반 API·좌표·도달 및 정착 판정 |
+| [RobotTwinClient 작업 및 데이터 수집 가이드](docs/RobotTwinClient_작업_및_데이터_수집_가이드.md) | 집기·놓기·쌓기·peg 삽입·세션 및 에피소드 수집 |
+| [로봇 트윈 MCP 서버 설계 및 운영 가이드](docs/로봇_트윈_MCP_서버_설계_및_운영_가이드.md) | MCP 설치·등록·도구 계약·설계 근거 |
+
 ## 구성
 
 | 모듈 | 설명서 절 | 내용 |
 |---|---|---|
 | `robot_twin_client/client.py` | 5.2 | `RobotTwinClient` (변수 조회 · 카탈로그 · 연산 실행 · 취소 · E-stop), `TwinError` |
 | `robot_twin_client/ops.py` | 5.6 / 5.7 / 4.2 | `move_linear_verified` (도달 검증), `move_to_named_target_verified` (SRDF 이름으로 이동), `set_gripper` (파지 판정) |
-| `robot_twin_client/pick_n_place.py` | 5.9 / 5.10 | `pick` · `place` · `above_of` · `rotated_about_base_z` · **`to_arm_command`**(TCP → `panda_link8` 프레임 보정), **`reset_and_pick_and_place`**(씬 리셋 + 에피소드 경계), CLI `main` |
+| `robot_twin_client/geometry.py` | — | **좌표 · 기하 (기반 층, 표준 라이브러리만).** `center_of` · `grasp_pose_of` · `above_of` · `rotated_about_base_z` · `down_with_yaw` · `yaw_of` · 쿼터니언 연산 |
+| `robot_twin_client/panda_hand.py` | — | **`to_arm_command`**(TCP → `panda_link8` 프레임 보정) · `tcp_from_arm_pose` — **Panda Hand(mock · Isaac) 전용**, 프레임을 스스로 바꾸는 펑션베이 트윈에는 쓰지 않는다 |
+| `robot_twin_client/pick_n_place.py` | 5.9 / 5.10 | `pick` · `place` · **`reset_and_pick_and_place`**(씬 리셋 + 에피소드 경계), CLI `main`. 위 두 모듈의 이름을 호환용으로 다시 내보낸다 |
 | `robot_twin_client/stack.py` | — | **쌓기.** 물체를 집어 다른 물체 위에 얹는다 — `half_height_of`(타입별 치수 해석) · **`held_offset`**(쥔 뒤 실측 보정) · `await_fresh_scene`(리셋 반영 대기) · `stack` · **`reset_and_stack`** · `verify_stacked`, CLI `main` |
 | `robot_twin_client/peg_in_hole.py` | — | **peg-in-hole.** `pick_peg` · `place_peg` · `move_peg` — 구멍에 꽂고 빼는 절차와 **세 판정**(파지 오프셋 보정 · 기하 사전 확인 · 앉음 확인). CLI `robot-twin-peg` |
 | `robot_twin_client/mcp_server.py` | — | **MCP 서버.** 트윈 카탈로그를 LLM 도구로 노출한다 (아래 참고) |
@@ -137,7 +147,7 @@ reset_scene ─ pick → place ─ return_home
 인자를 주지 않으면 설명서의 예시 좌표를 쓴다. 좌표는 `position`(m) + 고정 자세
 `DOWN`(그리퍼가 아래를 봄)이며 좌표계는 **`panda_link0` 고정**이다.
 
-트윈이 다른 호스트/포트에 있으면 `--host` / `--port` / `--twin-id` 로 지정한다.
+트윈이 다른 곳에 있으면 `--url` (서버 루트, 예: `https://twin.example:8801`) / `--twin-id` 로 지정한다.
 
 > **이 프로그램은 실제로 로봇을 움직인다.** 파지 판정(`stalled`)은 그 자리에 실제로
 > 물체가 있어야 성립하고, 회전한 자리가 작업 공간 안이어야 한다.
@@ -152,7 +162,7 @@ from robot_twin_client import (
     RobotTwinClient, above_of, grasp_pose_of, pick, place, return_home, rotated_about_base_z
 )
 
-twin = RobotTwinClient(host='127.0.0.1', port=8801, twin_id='panda01')
+twin = RobotTwinClient(base_url='http://127.0.0.1:8801', twin_id='panda01')
 
 placement = twin.outputs('reset_scene', {'scene': 'one_cube', 'seed': 7})   # 실패면 OperationFailed
 grasp = grasp_pose_of(placement['objects'][0])   # 배치된 물체를 집는다
@@ -165,10 +175,34 @@ if pick(twin, above_of(grasp), grasp):
 
 경계까지 포함한 전체 흐름은 `reset_and_pick_and_place(twin, args)` 하나로 돈다.
 
+### 씬 초기화 — `robot-twin-reset`
+
+물체를 레시피대로 **다시 배치만** 한다. 로봇은 움직이지 않는다.
+
+```bash
+uv run robot-twin-reset                                # 지정 위치 — 처음 배치(initial)
+uv run robot-twin-reset --scene two_objects            # 무작위 — seed 를 뽑아 출력한다
+uv run robot-twin-reset --scene two_objects --seed 7   # 무작위지만 같은 배치를 재현
+uv run robot-twin-reset --list                         # 이 트윈의 레시피 이름
+```
+
+**무작위인지 지정 위치인지는 레시피가 정한다** — 트윈 설정에서 축마다 숫자면 고정, `[최소, 최대]`
+면 추출이다. Isaac 트윈은 `two_objects` · `one_block`(무작위)과 `initial`(`isaac_scene.json` 의
+처음 배치)을 둔다. **seed 를 안 주면 새로 뽑는다** — 기본값을 0 으로 두면 무작위 레시피가 매번
+같은 배치가 되기 때문이며, 뽑은 값을 출력하므로 `--seed` 로 다시 만들 수 있다.
+
+리셋 뒤 `scene_objects` 가 새 배치를 말할 때까지 기다렸다가 **실제로 놓인 자리**와 명령한
+자리의 차이를 함께 보인다(`--no-check` 면 씬을 읽지 않는다). 레시피는 떠 있는 트윈의 설정이
+정하며(`--list`), 기본 레시피 `initial` 은 Isaac 트윈에만 있다. 팔이 움직이는 중에는 `reset_scene` 이 거부된다(409) — `arm` 자원도 잡기
+때문이다.
+
+고정 좌표로 움직이는 `examples/stack_block_on_cylinder_fixed.py` 는 처음 배치를 전제하므로
+그 앞에 `robot-twin-reset` 을 부른다.
+
 ### peg-in-hole — `robot-twin-peg`
 
-peg 을 한 고정물에서 다른 고정물로 **옮겨 꽂는다.** 펑션베이 백엔드 전용이다
-(포트·트윈 이름 기본값이 그쪽이다).
+peg 을 한 고정물에서 다른 고정물로 **옮겨 꽂는다.** 펑션베이 백엔드 전용이다 — 떠 있는
+트윈이 고정물(`fixtures` 변수)을 내지 않으면 움직이기 전에 거부한다.
 
 ```bash
 uv run robot-twin-peg                 # 반대쪽으로 (지금 위치에서 자동 판단)
@@ -206,6 +240,7 @@ uv run robot-twin-stack                                  # block_a 를 cylinder_
 uv run robot-twin-stack --source cylinder_a --base block_a   # 반대로
 uv run robot-twin-stack --repeat 10                      # 10 회 반복 (매 회 ready 복귀 + 씬 무작위)
 uv run robot-twin-stack --repeat 10 --seed 100           # 재현 가능한 10 회
+uv run robot-twin-stack --scene initial                  # 처음 배치(지정 위치)에서 쌓는다
 uv run robot-twin-stack --no-reset          # 이미 놓인 것 위에 이어서 쌓는다
 ```
 
@@ -215,7 +250,8 @@ reset_scene ─ pick(source) ─ 물린 위치 실측 ─ place(base 위) ─ re
 
 **시작할 때 씬을 먼저 배치한다.** 리셋 없이 두 번 돌리면 이미 얹혀 있는 물체를 다시
 집어 제자리에 놓는 꼴이 된다. `--scene` / `--seed` 로 레시피와 배치를 고르고, 같은
-시드는 같은 배치를 준다.
+시드는 같은 배치를 준다. Isaac 트윈의 레시피는 무작위 둘(`two_objects` 기본 · `one_block`
+블록만)과 **지정 위치 하나(`initial` — `isaac_scene.json` 의 처음 배치, seed 무관)** 다.
 
 **리셋은 `stack` 밖에 있다.** 쌓기는 겹쳐 쓸 수 있어야 하기 때문이다 — A 위에 B 를
 올린 뒤 그 위에 C 를 올리는 식이다. `stack` 이 스스로 리셋하면 **두 번째 호출이 첫
@@ -259,15 +295,17 @@ scene_objects 변수            딕셔너리  {'objects': {이름: {'type', 'dim
 끝나고 `verify_stacked` 로 두 물체의 높이차와 가로 어긋남을 확인한다.
 
 > **물리가 있는 백엔드가 필요하다.** mock 은 물체가 서로 얹히지 않아 확인할 수 없다.
-> 그래서 기본 접속 대상이 `robot-twin-pick`(8801 / `panda01`) 과 달리
-> **8802 / `panda_isaac`** 이다.
+> `--twin-id` 기본값은 Isaac 트윈의 id `panda01` 이지만 id 는 설정에서 바꿀 수 있어 환경 판정의
+> 근거가 못 되므로, 트윈 메타의 `backend` 가 `panda_isaac` 이 아니면 시작하지 않는다
+> (`require_backend`). mock 에서 시퀀스만
+> 디버그하려면 `--any-backend` 로 끈다. `robot-twin-collect` 는 끄는 옵션이 없다.
 
 라이브러리로 쓸 때는 다음과 같다.
 
 ```python
 from robot_twin_client import RobotTwinClient, reset_and_stack, stack, verify_stacked
 
-twin = RobotTwinClient(host='127.0.0.1', port=8802, twin_id='panda_isaac')
+twin = RobotTwinClient(base_url='http://127.0.0.1:8801', twin_id='panda01')
 
 # 배치부터 하고 쌓는다.
 if reset_and_stack(twin, 'block_a', 'cylinder_a', scene='two_objects', seed=7):
@@ -278,6 +316,8 @@ stack(twin, 'block_b', 'cylinder_a')
 ```
 
 ## MCP 서버
+
+설치·등록·문제 해결과 도구 결과 계약은 [로봇 트윈 MCP 서버 설계 및 운영 가이드](docs/로봇_트윈_MCP_서버_설계_및_운영_가이드.md)에 정리되어 있다.
 
 LLM 에이전트가 프로그램을 짜지 않고 대화만으로 로봇 상태를 확인하고 연산을 조합할
 수 있게 한다. *"박스를 반시계 50도로 옮겨줘"* 같은 요청을 에이전트가 도구 조합으로
@@ -297,7 +337,7 @@ ros2 launch robot_control panda_mock.launch.py
 
 # 터미널 B — 트윈 (rdfp_ws)
 rdfp_env
-./scripts/run_robot_twin.sh
+./scripts/run_robot_twin.sh --twin mock01   # --twin 은 필수다 (mock01 · panda01 · rdfp01)
 ```
 
 `rdfp_env` 는 rdfp_ws 머신의 옵트인 셸 함수다(`~/.bashrc` 가 정의만 한다). 켜지 않고
@@ -324,11 +364,11 @@ stdio 트랜스포트이므로 보통 직접 실행하지 않고 MCP 클라이�
 ./sbin/register_mcp_server.sh                      # 기본 (user scope — 모든 프로젝트)
 ./sbin/register_mcp_server.sh --scope local        # 이 프로젝트에서만
 
-# 두 번째 트윈. **`--twin-id` 를 빠뜨리지 않는다** — 포트만 바꾸면 트윈 id 가 기본값
-# `panda01` 로 남아 URL 이 /api/v1/robot_twins/panda01 이 되고, 도구 목록을 가져올 때
+# 다른 로봇의 트윈. **`--twin-id` 를 빠뜨리지 않는다** — URL 만 바꾸면 트윈 id 가 기본값
+# `rdfp01` 로 남아 URL 이 /api/v1/robot_twins/rdfp01 이 되고, 도구 목록을 가져올 때
 # `HTTP 404` 로 실패한다. 등록 자체는 성공하므로 증상이 그 404 뿐이다.
-./sbin/register_mcp_server.sh --name robot-twin-isaac \
-    --port 8802 --twin-id panda_isaac
+./sbin/register_mcp_server.sh --name robot-twin-02 \
+    --url http://127.0.0.1:8802 --twin-id panda02
 ```
 
 **기본이 `user` scope 인 이유** — `local` 은 등록할 때의 프로젝트 디렉터리에서만
@@ -342,11 +382,11 @@ stdio 트랜스포트이므로 보통 직접 실행하지 않고 MCP 클라이�
 
 ```bash
 ./sbin/register_mcp_server.sh --remove                          # robot-twin (기본 이름)
-./sbin/register_mcp_server.sh --name robot-twin-isaac --remove  # 이름을 지정해서
+./sbin/register_mcp_server.sh --name robot-twin-02 --remove     # 이름을 지정해서
 ```
 
-**`--port` / `--twin-id` 는 해제에 아무 영향이 없다.** 등록할 때 쓰는 인자라
-`--port 8802 --remove` 로 써도 지워지는 것은 여전히 `robot-twin` 이다. 대상은
+**`--url` / `--twin-id` 는 해제에 아무 영향이 없다.** 등록할 때 쓰는 인자라
+`--url http://127.0.0.1:8802 --remove` 로 써도 지워지는 것은 여전히 `robot-twin` 이다. 대상은
 **이름뿐**이다.
 
 없는 이름을 주면 조용히 아무것도 하지 않는다 — `removed existing registration: <이름>`
@@ -376,21 +416,23 @@ claude mcp add robot-twin -- "$(command -v uv)" --directory ~/development/mdtpy/
 
 ### 펑션베이 로봇에 붙기
 
-펑션베이는 mock 과 **세 가지가 다르다** — 시뮬레이터가 Windows 쪽에 있고, 트윈 포트가
-`8803`, 트윈 이름이 `panda_functionbay` 다.
+펑션베이는 mock 과 **시뮬레이터가 Windows 쪽에 있다**는 것이 다르다. 펑션베이 트윈의 id 는
+`rdfp01` 이고(2026-10-25) 서버 기본값이 그것이라 **기본 등록 하나로 붙는다**. Isaac 트윈은 id 가
+`panda01` 이라 `--twin-id panda01` 로 따로 등록한다(예: `--name robot-twin-isaac`).
 
 #### 기동 — 매번 (아래에서 위로)
 
 ```bash
-# 0. 시뮬레이터 (Windows) — MetaMotionRobot + SolverTCPServer 가 떠 있어야 한다
+# 0. 시뮬레이터 (Windows) · endpoint · /scene/start · 차트 대기 — rdfp_ws 의
+#    docs/backends/functionbay/펑션베이_시뮬레이터_사용법.md §2 순서대로
 
 # 터미널 A — 로봇 스택 (rdfp_ws)
 rdfp_env
 ros2 launch robot_control panda_functionbay.launch.py
 
-# 터미널 B — 트윈 :8803 (rdfp_ws)
+# 터미널 B — 트윈 rdfp01 · :8801 (rdfp_ws)
 rdfp_env
-./scripts/run_robot_twin.sh --functionbay
+./scripts/run_robot_twin.sh --twin rdfp01
 ```
 
 ⚠️ **시뮬레이터를 *프로세스째* 재시작했으면 터미널 A 도 다시 띄운다.** 앱 내 재시작은
@@ -400,16 +442,11 @@ rdfp_env
 
 #### 등록 — 한 번만
 
-**`--port 8803 --twin-id panda_functionbay` 둘 다 필수다.** 서버 기본값이
-`8801` / `panda01`(mock)이라, 포트만 주면 `HTTP 404` 로 도구 조회가 실패하고 둘 다 빼면
-**mock 트윈에 조용히 붙는다.**
+**인자가 없다** — 위 기본 등록을 그대로 쓴다. 대신 **다른 환경의 트윈이 떠 있으면 거기에
+조용히 붙는다**(연결만으로는 환경이 안 갈린다). 펑션베이 트윈이 떠 있는지는 peg 도구가 목록에
+보이는지로 알 수 있다 — 그 도구는 트윈이 `fixtures` 변수를 낼 때(펑션베이)만 나온다.
 
-**`claude` CLI 가 있으면** 위의 등록 스크립트를 쓴다. **mock 등록과 이름을 나눈다** —
-같은 이름이면 덮어써진다.
-
-```bash
-./sbin/register_mcp_server.sh --name robot-twin-fb --port 8803 --twin-id panda_functionbay
-```
+**`claude` CLI 가 있으면** 위의 등록 스크립트를 쓴다(`./sbin/register_mcp_server.sh`).
 
 **VSCode 확장처럼 `claude` 가 PATH 에 없으면** 둘 중 하나다 —
 `./sbin/install_claude_cli.sh` 로 CLI 를 깔거나, 작업 워크스페이스 루트에 `.mcp.json` 을
@@ -420,7 +457,7 @@ rdfp_env
 { "mcpServers": {
     "robot-twin": {
       "command": "${HOME}/development/mdtpy/robot-twin-client/.venv/bin/robot-twin-mcp",
-      "args": ["--port", "8803", "--twin-id", "panda_functionbay"] } } }
+      "args": [] } } }
 ```
 
 `${HOME}` 은 Claude Code 가 `.mcp.json` 을 읽을 때 환경변수로 펼친다. 체크아웃 위치가
@@ -442,7 +479,7 @@ spawn 하므로 창을 다시 로드한다(`Developer: Reload Window`). 고친 �
 #### 확인
 
 ```bash
-./sbin/check_mcp_server.sh --port 8803 --twin-id panda_functionbay   # 도구 21개면 정상
+./sbin/check_mcp_server.sh            # 펑션베이 트윈이면 도구 21개(peg 넷 포함)
 ```
 
 Claude Code 에서는 `/mcp` 에 보이면 된다. peg 작업은 `peg_in_hole` 프롬프트와 도구
@@ -456,8 +493,8 @@ Claude Code 에서는 `/mcp` 에 보이면 된다. peg 작업은 `peg_in_hole` �
 | 증상 | 원인 |
 |---|---|
 | `/mcp` 에 없음 · `ENOENT` | 창 리로드 안 함 / `uv sync --extra mcp` 안 함 |
-| `tools fetch failed` · `Connection refused` | 트윈(:8803)이 안 떠 있음 |
-| `HTTP 404` | `--twin-id` 빠짐 — 포트만 줬다 |
+| `tools fetch failed` · `Connection refused` | 트윈(:8801)이 안 떠 있음 |
+| peg 도구가 목록에 없음 | 떠 있는 트윈이 펑션베이가 아니다 — 트윈 메타의 `backend` 를 본다 |
 | 도구는 성공하는데 팔이 안 움직임 | ROS 스택 — 시뮬레이터 프로세스 재시작 뒤 스택을 안 띄움 |
 
 ### sbin/
@@ -533,7 +570,7 @@ end_task   ─ stop_episode ─ stop_session      ← 한쪽이 실패해도 나
 
 ⚠️ **`is_error: false` 는 로봇 작업의 성공이 아니다.** 연산이 `FAILED` 로 끝나도, 이동이 목표에
 못 갔어도(`reached: false`), 경계를 못 닫았어도(`closed: false`) 결과는 정상 응답으로 온다 —
-결과 안의 판정 필드를 본다(`rdfp_ws/docs/twin/로봇_트윈_MCP_서버_설계서.md` §3 「호출 · 결과 계약」).
+결과 안의 판정 필드를 본다([로봇 트윈 MCP 서버 설계 및 운영 가이드](docs/로봇_트윈_MCP_서버_설계_및_운영_가이드.md) §3 「호출 · 결과 계약」).
 
 같은 `PRECONDITION_FAILED` 라도 오는 자리에 따라 뜻이 다르다.
 

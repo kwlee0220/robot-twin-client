@@ -10,13 +10,14 @@
 
 from __future__ import annotations
 
-from .client import OperationFailed, RobotTwinClient, TwinError
-from .ops import move_linear_verified, move_to_named_target_verified, set_gripper
-from .pick_n_place import (
-    DOWN, TCP_OFFSET_M, above_of, center_of, grasp_pose_of, pick, place,
-    reset_and_pick_and_place, return_home, rotated_about_base_z,
-    tcp_from_arm_pose, to_arm_command
+from .client import (
+    DEFAULT_BASE_URL, DEFAULT_TWIN_ID, OperationFailed, RobotTwinClient, TwinError, WrongBackend,
+    require_backend
 )
+from .geometry import DOWN, above_of, center_of, grasp_pose_of, rotated_about_base_z
+from .ops import move_linear_verified, move_to_named_target_verified, set_gripper
+from .panda_hand import TCP_OFFSET_M, tcp_from_arm_pose, to_arm_command
+from .pick_n_place import pick, place, reset_and_pick_and_place, return_home
 from .stack import (
     half_height_of, held_offset, reset_and_stack, scene_object, stack, stack_pose_of,
     verify_stacked
@@ -25,10 +26,12 @@ from .collect import collect, collect_episode
 
 __version__ = '0.1.0'
 
-__all__ = ['DOWN', 'OperationFailed', 'RobotTwinClient', 'TCP_OFFSET_M', 'TwinError',
+__all__ = ['DEFAULT_BASE_URL', 'DEFAULT_TWIN_ID', 'DOWN', 'OperationFailed', 'RobotTwinClient',
+           'TCP_OFFSET_M', 'TwinError',
            'above_of', 'center_of', 'collect', 'collect_episode',
            'grasp_pose_of', 'half_height_of', 'held_offset',
            'move_linear_verified', 'move_to_named_target_verified',
            'pick', 'place', 'reset_and_pick_and_place', 'return_home',
-           'reset_and_stack', 'rotated_about_base_z', 'scene_object', 'set_gripper', 'stack',
-           'stack_pose_of', 'tcp_from_arm_pose', 'to_arm_command', 'verify_stacked']
+           'require_backend', 'reset_and_stack', 'rotated_about_base_z', 'scene_object',
+           'set_gripper', 'stack', 'stack_pose_of', 'tcp_from_arm_pose', 'to_arm_command',
+           'verify_stacked', 'WrongBackend']

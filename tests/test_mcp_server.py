@@ -15,8 +15,8 @@ import pytest
 
 from conftest import SCENE_OBJECTS, FakeTwin
 from robot_twin_client.client import OperationFailed, TwinError
-from robot_twin_client.mcp_server import InvalidToolInput, TwinTools, _error_text
-from robot_twin_client.pick_n_place import TCP_OFFSET_M
+from robot_twin_client.mcp_server import InvalidToolInput, TwinChanged, TwinTools, _error_text
+from robot_twin_client.panda_hand import TCP_OFFSET_M
 
 
 def _tools(**kwargs: Any) -> tuple[TwinTools, FakeTwin]:
@@ -171,6 +171,53 @@ def test_move_linear_reports_not_reached_when_path_is_truncated():
 def test_move_linear_reports_reached_within_tolerance():
     tools, _ = _tools(pose_offset_m=0.001)
     assert tools.call('move_linear', {'pose': dict(POSE)})['reached'] is True
+
+
+@pytest.mark.parametrize('limit', [None, 15.0])
+def test_move_linear_passes_default_or_requested_settle_limit(monkeypatch, limit):
+    from robot_twin_client import mcp_server
+    calls = []
+    def move(twin, pose, **kwargs):
+        calls.append(kwargs)
+        return {'reached': False, 'reason': 'SETTLE_TIMEOUT', 'why': 'not settled'}
+    monkeypatch.setattr(mcp_server, 'move_linear_verified', move)
+    tools, _ = _tools()
+    args = {'pose': dict(POSE)}
+    if limit is not None:
+        args['settle_sec'] = limit
+    result = tools.call('move_linear', args)
+    assert calls[0]['settle_sec'] == (10.0 if limit is None else limit)
+    assert result['reason'] == 'SETTLE_TIMEOUT'
+
+
+def test_mcp_move_cannot_report_reached_from_a_frozen_pose_cache():
+    class FrozenTwin(FakeTwin):
+        cached = None
+        def read_raw(self, name):
+            if self.cached is None:
+                self.cached = super().read_raw(name)
+            return self.cached
+    twin = FrozenTwin()
+    result = TwinTools(twin).call('move_linear', {'pose': dict(POSE)})
+    assert result['reached'] is False
+    assert result['reason'] == 'SETTLE_TIMEOUT'
+    assert 'error_m' not in result
+    assert len(twin.calls) == 1  # 자동 재시도하지 않는다.
+
+
+@pytest.mark.parametrize('limit', [0, -1])
+def test_mcp_cannot_disable_settling(limit):
+    tools, twin = _tools()
+    with pytest.raises(InvalidToolInput, match='settle_sec'):
+        tools.call('move_linear', {'pose': dict(POSE), 'settle_sec': limit})
+    assert twin.calls == []
+
+
+def test_mcp_move_schema_and_description_explain_settle_failure():
+    tools, _ = _tools()
+    tool = next(t for t in tools.list_tools() if t.name == 'move_linear')
+    assert tool.input_schema['properties']['settle_sec']['default'] == 10.0
+    assert 'SETTLE_TIMEOUT' in tool.description
 
 
 def test_move_to_named_target_flags_open_loop():
@@ -467,3 +514,105 @@ def test_move_to_named_target_is_not_corrected():
 
     sent = next(i for op, i in twin.calls if op == 'move_to_named_target')
     assert 'pose' not in sent
+
+
+def test_move_linear_returns_the_settled_observation():
+    """정착 후 위치를 `ee_pose` 로 다시 읽지 않아도 되게 판정에 쓴 관측값을 함께 준다."""
+    tools, _ = _tools(pose_offset_m=0.001)
+    result = tools.call('move_linear', {'pose': dict(POSE)})
+    assert result['reached'] is True
+    assert 'position' in result['settled_pose']['pose']
+
+
+# ----------------------------------------------------------------------
+# 트윈 교체 감지 (2026-10-23)
+# ----------------------------------------------------------------------
+#
+# 같은 id 의 트윈을 다른 설정으로 다시 띄우면 이 서버는 연결된 채 옛 카탈로그를 쓴다. 그 카탈로그로 `move_linear` 의 프레임 보정 여부를 정하므로, 감지하지
+# 않으면 mock → 펑션베이에서 보정이 덧씌워져 그리퍼가 10.3 cm 아래를 겨냥한다.
+
+class _SwitchingTwin(FakeTwin):
+    """`switch()` 뒤에는 펑션베이 트윈처럼 보인다 — backend · `frame` 입력 · `fixtures` 가 바뀐다."""
+
+    def __init__(self) -> None:
+        super().__init__(backend='panda_mock', has_fixtures=False)
+        self._frame = False
+
+    def switch(self) -> None:
+        self._backend = 'panda_functionbay'
+        self._has_fixtures = True
+        self._frame = True
+
+    def operations(self) -> list:
+        ops = super().operations()
+        if not self._frame:
+            return ops
+        out = []
+        for op in ops:
+            if op['name'] == 'move_linear':
+                schema = dict(op['inputs_schema'])
+                schema['properties'] = {**schema.get('properties', {}), 'frame': {'type': 'string'}}
+                op = {**op, 'inputs_schema': schema}
+            out.append(op)
+        return out
+
+
+def _switched() -> tuple[TwinTools, _SwitchingTwin]:
+    twin = _SwitchingTwin()
+    tools = TwinTools(twin)
+    tools.list_tools()                       # 옛 트윈의 카탈로그를 잡아 둔다
+    assert tools._twin_resolves_frames() is False
+    twin.switch()
+    return tools, twin
+
+
+def test_first_move_after_a_twin_switch_is_refused_and_the_catalog_reloaded(monkeypatch):
+    from robot_twin_client import mcp_server
+    poses = []
+    monkeypatch.setattr(mcp_server, 'move_linear_verified',
+                        lambda twin, pose, **kw: poses.append(pose) or {'reached': True})
+    tools, _ = _switched()
+
+    with pytest.raises(TwinChanged) as exc:
+        tools.call('move_linear', {'pose': dict(POSE)})
+    assert poses == []                                    # 아무것도 실행하지 않았다
+    assert (exc.value.before[0], exc.value.after[0]) == ('panda_mock', 'panda_functionbay')
+    assert tools._twin_resolves_frames() is True          # 새 카탈로그로 판별한다
+
+    tools.call('move_linear', {'pose': dict(POSE)})       # 다음 호출은 실행된다
+    assert poses == [POSE]                                # 트윈이 변환하므로 보정하지 않는다
+
+
+def test_reads_after_a_twin_switch_are_not_refused():
+    """바뀐 뒤에 할 일이 상태를 다시 읽는 것이다 — 그것까지 막으면 복구할 길이 없다."""
+    tools, _ = _switched()
+    assert tools.call('list_state_variables', {}) is not None
+
+
+def test_tool_list_follows_the_new_twin():
+    tools, _ = _switched()
+    assert {'peg_status', 'move_peg'} <= _names(tools)    # 펑션베이에는 고정물이 있다
+
+
+def test_geometry_and_estop_do_not_query_the_twin():
+    """기하 도구는 트윈이 꺼져 있어도 돌아야 하고, 비상정지 앞에는 조회를 끼우지 않는다."""
+    class _NoMeta(FakeTwin):
+        stopped = False
+
+        def meta(self):
+            raise AssertionError('meta() must not be called')
+
+        def estop(self):
+            self.stopped = True
+            return {'estop': 'ENGAGED'}
+
+    twin = _NoMeta()
+    tools = TwinTools(twin)
+    tools.call('pose_above', {'pose': dict(POSE)})
+    tools.call('emergency_stop', {})
+    assert twin.stopped
+
+
+def test_twin_change_message_says_nothing_ran():
+    text = _error_text(TwinChanged(('panda_mock',), ('panda_functionbay',)))
+    assert '아무것도 실행하지 않았다' in text and 'read_state' in text

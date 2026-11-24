@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from datetime import datetime, timezone
 
 import pytest
 
@@ -59,8 +60,11 @@ class FakeTwin:
                  scene_objects: Optional[list] = None,
                  session_state: str = 'IDLE',
                  failures: Optional[dict] = None,
-                 has_fixtures: bool = True) -> None:
+                 has_fixtures: bool = True,
+                 backend: str = 'panda_isaac') -> None:
         self.calls: list[tuple[str, dict]] = []
+        # 트윈 메타의 `backend` — 환경 전용 명령(`stack` · `collect`)이 이것으로 환경을 확인한다.
+        self._backend = backend
         # 고정물 변수(`fixtures`)를 내놓는가 — 펑션베이 트윈만 그렇다. 기본은 내놓는 쪽이라
         # peg 도구가 목록에 보인다. mock · Isaac 을 흉내내려면 False 로 둔다.
         self._has_fixtures = has_fixtures
@@ -145,10 +149,23 @@ class FakeTwin:
     # ----- 카탈로그 (MCP 서버가 도구를 자동 생성할 때 쓴다) -----
 
     def read_raw(self, name: str) -> dict:
-        return {'name': name, 'quality': 'OK', 'value': self.read(name)}
+        body = {'name': name, 'quality': 'OK', 'value': self.read(name)}
+        if name == 'ee_pose':
+            # 위치가 같아도 발행이 계속되면 새 표본이다. 테스트의 가상 시계를 사용한다.
+            now = ops.time.monotonic()
+            tick = round(now * 10**9)
+            body.update(received_at=datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                        stamp={'sec': tick // 10**9, 'nanosec': tick % 10**9})
+        return body
 
     def read_many(self, *names: str) -> dict:
         return {n: {'quality': 'OK', 'value': self.read(n)} for n in names}
+
+    def meta(self) -> dict:
+        """`GET /robot_twins/<id>` 응답 모양."""
+        return {'id': 'panda01', 'backend': self._backend,
+                'variables': [v['name'] for v in self.variables()],
+                'operations': [o['name'] for o in self.operations()]}
 
     def variables(self) -> list:
         catalog = [{'name': 'session_state', 'description': '수집 상태', 'units': {}}]

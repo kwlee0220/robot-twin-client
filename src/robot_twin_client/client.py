@@ -10,15 +10,44 @@ from typing import Any, Optional
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+
+
+DEFAULT_BASE_URL = 'http://127.0.0.1:8801'
+# 기본으로 붙는 트윈 — 펑션베이 트윈 `rdfp01` (2026-10-25). 출하 트윈은 환경마다 id 가 달라
+# (`rdfp01` · `panda01` · `mock01`) 다른 환경에 붙을 때는 id 를 준다. 틀리면 404 다.
+DEFAULT_TWIN_ID = 'rdfp01'
+
+
+def _server_root(base_url: str) -> str:
+    """`base_url` 을 확인하고 끝의 `/` 를 뗀 `scheme://netloc` 을 돌려준다.
+
+    연결은 하지 않는다 — 형식만 본다. 스킴을 빠뜨린 `127.0.0.1:8801` 을 그대로 두면 첫 호출에서
+    `unknown url type` 처럼 원인이 안 보이는 오류가 난다(`localhost:8801` 은 `localhost` 가
+    스킴으로 읽힌다).
+
+    **경로는 거부한다** — 트윈은 `session_endpoint` 를 접두사 없는 절대 경로(`/api/v1/...`)로
+    돌려주므로, 리버스 프록시 접두사(`https://gw/twin`)를 받으면 동기 연산은 되고 202 뒤의
+    폴링만 404 로 깨진다. 접두사를 지원하려면 서버가 `root_path` 를 따라야 한다.
+    """
+    parts = urllib.parse.urlsplit(base_url)
+    if parts.scheme not in ('http', 'https') or not parts.hostname:
+        raise ValueError(f"base_url must look like 'http(s)://host[:port]', got {base_url!r}")
+    parts.port                                 # 포트가 숫자가 아니면 여기서 ValueError 다
+    if parts.path.strip('/') or parts.query or parts.fragment:
+        raise ValueError(
+            f'base_url must be the server root without a path, got {base_url!r} '
+            '(path prefixes are unsupported: the twin returns absolute session endpoints)')
+    return f'{parts.scheme}://{parts.netloc}'
 
 
 class OperationFailed(Exception):
     """연산이 **접수된 뒤** 실패로 끝났다 (status 가 COMPLETED 가 아니다).
 
     `TwinError` 와 다르다 — 그쪽은 요청 자체가 거부된 것(4xx/5xx)이고, 이쪽은 접수되어
-    실행되다가 실패한 것이라 HTTP 는 202 였다. 트윈이 세션 상태의 `error` 에 사유를
-    넣어 주므로 그것을 그대로 싣는다.
+    실패 상태를 반환한 것이다. HTTP 200의 동기 실패와 202 이후 조회한 비동기 실패가
+    모두 포함된다. 트윈이 결과 상태의 `error` 에 넣은 사유를 그대로 싣는다.
 
     이 예외가 없던 시절 호출자들이 `run(...)['outputs']` 를 그냥 인덱싱했고, 실패
     응답에는 그 키가 없어 **`KeyError: 'outputs'`** 로 터졌다. 그러면 트윈이 준 진짜
@@ -49,21 +78,59 @@ class TwinError(Exception):
         self.body = body
 
 
+class WrongBackend(Exception):
+    """떠 있는 트윈이 이 작업이 요구하는 환경(백엔드)이 아니다.
+
+    출하 트윈은 환경마다 id 가 다르지만(`rdfp01` · `panda01` · `mock01`, 2026-10-25) id 는
+    사용자가 설정에서 바꿀 수 있으므로 **환경 판정의 근거로 삼지 않는다** — 트윈 메타의
+    `backend` 로 본다. 확인하지 않으면 Isaac 물리가 필요한
+    쌓기가 mock 트윈에 붙어 에러 없이 엉뚱하게 돈다.
+    """
+
+    def __init__(self, purpose: str, expected: tuple[str, ...], actual: Optional[str]) -> None:
+        self.purpose = purpose
+        self.expected = expected
+        self.actual = actual
+        got = actual or '알 수 없음 (트윈이 backend 를 알려 주지 않는다 — 옛 트윈이면 rdfp_ws 를 갱신한다)'
+        super().__init__(
+            f"{purpose}에는 {' · '.join(expected)} 트윈이 필요한데 떠 있는 트윈은 {got} 이다 — "
+            f'./scripts/run_robot_twin.sh --backend {expected[0]} 로 띄운다')
+
+
+def require_backend(twin: Any, *expected: str, purpose: str) -> str:
+    """떠 있는 트윈이 `expected` 중 하나의 환경인지 확인하고 그 이름을 돌려준다.
+
+    아니면 :class:`WrongBackend`. 환경은 트윈 메타의 `backend` 로 안다 — id 는 환경을 담지
+    않는다. **환경 이름이 아니라 능력으로 가를 수 있으면 그쪽이 낫다** (peg 는 `fixtures`
+    변수 유무로 가른다). 이것은 쌓기처럼 능력을 변수 하나로 못 가를 때 쓴다.
+    """
+    actual = twin.meta().get('backend')
+    if actual not in expected:
+        raise WrongBackend(purpose, tuple(expected), actual)
+    return actual
+
+
 class RobotTwinClient:
     """원격 로봇 트윈에 REST 로 명령을 전달하는 **대리자**.
 
     **트윈이 아니다.** 상태도 자원 락도 세션도 원격 쪽(`rdfp_ws` 의 `robot_twin` 노드)이
-    갖는다. 이 객체가 가진 것은 URL 두 개뿐이라 **생성해도 연결하지 않고 확인도 하지
-    않는다** — 트윈이 안 떠 있어도 생성은 성공하고, 첫 호출에서야 드러난다. 그래서 두 개를
+    갖는다. 이 객체는 접속 URL과 HTTP 시간 제한을 보관하며 **생성해도 연결하지 않고
+    확인도 하지 않는다** — 트윈이 안 떠 있어도 생성은 성공하고, 첫 호출에서야 드러난다. 그래서 두 개를
     만든다고 트윈이 둘이 되는 것이 아니라 같은 트윈을 가리키는 손잡이가 둘이다.
 
     이름이 `RobotTwin` 이던 시절에는 그 오해를 docstring 이 되받아야 했다 (2026-09-11 개명).
     """
 
-    def __init__(self, host: str = '127.0.0.1', port: int = 8801,
-                 twin_id: str = 'panda01', *, http_timeout_sec: float = 30.0) -> None:
-        self.base = f'http://{host}:{port}/api/v1/robot_twins/{twin_id}'
-        self.root = f'http://{host}:{port}'
+    def __init__(self, base_url: str = DEFAULT_BASE_URL, twin_id: str = DEFAULT_TWIN_ID, *,
+                 http_timeout_sec: float = 30.0) -> None:
+        """`base_url` 은 트윈 서버의 루트(`http(s)://호스트[:포트]`)다 — API 경로는 넣지 않는다.
+
+        `/api/v1/robot_twins/<id>` 는 이 클라이언트가 붙인다. 버전은 클라이언트 코드가 기대하는
+        API 이고, id 는 어느 트윈인지를 따로 드러내야 하므로 URL 에 섞지 않는다.
+        """
+        self.base_url = _server_root(base_url)
+        self.twin_id = twin_id
+        self.base = f'{self.base_url}/api/v1/robot_twins/{twin_id}'
         # **동기 연산의 `sync_timeout_sec` 보다 길어야 한다** — POST 응답이 그 뒤에 온다.
         # 10초였을 때 펑션베이 그리퍼(12초)와 `reset_scene`(10초)에서 트윈이 결과를 주기
         # 전에 클라이언트가 소켓 시간 초과로 먼저 끊겼다. 동작은 서버에서 계속된다.
@@ -72,7 +139,11 @@ class RobotTwinClient:
     # ----- 저수준 -----
     def _request(self, path: str, method: str = 'GET',
                  body: Optional[dict] = None) -> tuple[int, Any]:
-        url = path if path.startswith('http') else self.base + path
+        """트윈 기준 상대 경로(`/health` · `/operations/<이름>` …)로 요청한다."""
+        return self._send(self.base + path, method, body)
+
+    def _send(self, url: str, method: str = 'GET',
+              body: Optional[dict] = None) -> tuple[int, Any]:
         data = None if body is None else json.dumps(body).encode()
         headers = {'Content-Type': 'application/json'} if data else {}
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -88,6 +159,14 @@ class RobotTwinClient:
             return exc.code, parsed
 
     # ----- 상태 -----
+    def meta(self) -> dict:
+        """트윈 메타 — id · 설명 · `backend` · 실행 모드 · 변수/연산 이름.
+
+        **id 로는 환경을 모른다** — 출하 트윈은 환경마다 id 가 다르지만 설정에서 바꿀 수 있다.
+        어느 환경에 붙었는지는 여기의 `backend` 로 본다 (:func:`require_backend`).
+        """
+        return self._request('')[1]
+
     def health(self) -> dict:
         return self._request('/health')[1]
 
@@ -135,7 +214,7 @@ class RobotTwinClient:
         endpoint = body['session_endpoint']    # 202 — 폴링한다
         deadline = time.monotonic() + timeout_sec
         while True:
-            state = self._request(self.root + endpoint)[1]
+            state = self._send(self.base_url + endpoint)[1]
             if state['status'] != 'RUNNING':
                 return state
             if time.monotonic() > deadline:
@@ -158,7 +237,7 @@ class RobotTwinClient:
         return state.get('outputs') or {}
 
     def cancel(self, session_endpoint: str) -> dict:
-        return self._request(self.root + session_endpoint, 'DELETE')[1]
+        return self._send(self.base_url + session_endpoint, 'DELETE')[1]
 
     # ----- 안전 -----
     def estop(self) -> dict:
@@ -168,4 +247,5 @@ class RobotTwinClient:
         return self._request('/estop', 'DELETE')[1]
 
 
-__all__ = ['OperationFailed', 'RobotTwinClient', 'TwinError']
+__all__ = ['DEFAULT_BASE_URL', 'DEFAULT_TWIN_ID', 'OperationFailed', 'RobotTwinClient', 'TwinError',
+           'WrongBackend', 'require_backend']

@@ -17,7 +17,7 @@ import math
 import pytest
 
 from robot_twin_client import pick_n_place
-from robot_twin_client.pick_n_place import TCP_OFFSET_M, tcp_from_arm_pose
+from robot_twin_client.panda_hand import TCP_OFFSET_M, tcp_from_arm_pose
 from robot_twin_client.stack import (
     await_fresh_scene, center_of, half_height_of, held_offset, iteration_seeds,
     repeat_stack, reset_and_stack,
@@ -245,6 +245,8 @@ class ResetTwin(SceneTwin):
         self._stale_reads = stale_reads
 
     def read_raw(self, name: str) -> dict:
+        if name == 'ee_pose':
+            return super().read_raw(name)
         assert name == 'scene_objects'
         self._ticks += 1
         # 발행이 두 번 지나간 뒤부터 새 표본이 나온다.
@@ -294,6 +296,8 @@ class _FreshEveryRead(SceneTwin):
         self.reads = 0
 
     def read_raw(self, name: str) -> dict:
+        if name == 'ee_pose':
+            return super().read_raw(name)
         self.reads += 1
         return {'name': name, 'quality': 'OK', 'received_at': f'sample-{self.reads}',
                 'value': self.read(name)}
@@ -454,3 +458,18 @@ def test_repeat_opens_the_gripper_after_a_failure() -> None:
     failed_grasp = max(i for i in indices('grasp') if i < resets[1])
     assert any(failed_grasp < i < resets[1] for i in indices('open')), \
         '실패한 파지 뒤에 그리퍼를 열지 않고 다음 회로 갔다'
+
+
+def test_single_run_without_seed_sends_an_integer_seed(monkeypatch, capsys) -> None:
+    """`--seed` 를 빼면 무작위 정수를 뽑아 알려 준다 — `None` 을 보내면 트윈 스키마에 거부된다."""
+    import importlib
+    stack_module = importlib.import_module('robot_twin_client.stack')   # 같은 이름의 함수와 구분
+    seeds = []
+    twin = FakeTwin()
+    twin.health = lambda: {'move_group': 'READY'}
+    monkeypatch.setattr(stack_module, 'RobotTwinClient', lambda **kwargs: twin)
+    monkeypatch.setattr(stack_module, 'reset_and_stack',
+                        lambda *a, seed, **kw: seeds.append(seed) or False)
+    stack_module.main([])
+    assert len(seeds) == 1 and isinstance(seeds[0], int)
+    assert f'--seed {seeds[0]}' in capsys.readouterr().out

@@ -44,14 +44,13 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from .client import OperationFailed, RobotTwinClient, TwinError
+from .client import DEFAULT_BASE_URL, DEFAULT_TWIN_ID, OperationFailed, RobotTwinClient, TwinError
 from .ops import failure_why, move_linear_verified, move_to_named_target_verified
 from .peg_in_hole import (
     PegInHoleError, move_peg, pick_peg, place_peg, tilt_deg, where_is_peg
 )
-from .pick_n_place import (
-    above_of, grasp_pose_of, rotated_about_base_z, to_arm_command
-)
+from .geometry import above_of, grasp_pose_of, rotated_about_base_z
+from .panda_hand import to_arm_command
 
 # 호출하면 EXECUTION_ABORTED 로 실패하는 미구현 연산과, 짝을 잃기 쉬운 '여는' 연산.
 # `stop_session` / `stop_episode` 는 감추지 않는다 — 이전 실행이 남긴 세션을 에이전트가
@@ -63,6 +62,17 @@ _HIDDEN = frozenset({'move_to_pose', 'move_gripper', 'start_session', 'start_epi
 # 판별은 백엔드 이름이 아니라 **변수 카탈로그**로 한다 (`move_linear` 의 프레임 판별과 같다).
 _PEG_TOOLS = frozenset({'peg_status', 'pick_peg', 'place_peg', 'move_peg'})
 _PEG_REQUIRED_VARIABLE = 'fixtures'
+
+# 트윈이 바뀌었는지(`TwinTools._sync_catalog`) 확인하지 않는 도구. 기하 도구는 트윈을 부르지
+# 않으므로 트윈이 꺼져 있어도 돌아야 하고, 비상정지 앞에는 조회 한 번도 끼우지 않는다.
+_NO_TWIN_CHECK = frozenset({'pose_above', 'pose_rotated_about_base_z', 'grasp_pose_of_object',
+                            'emergency_stop', 'release_emergency_stop'})
+
+# 트윈이 바뀐 것을 처음 알아챈 호출이 이것이면 **실행하지 않고** 거절한다 — 로봇을 움직이거나
+# 작업을 연다. 옛 환경에서 읽은 좌표와 계획으로 새 환경의 로봇을 움직이지 않게 한다. 검증
+# 래퍼(`_OVERRIDES`)와 카탈로그에서 자동 생성한 도구도 여기에 든다(`TwinTools.call`).
+# 상태 읽기는 거절하지 않는다 — 바뀐 뒤에 할 일이 바로 그것이다.
+_REFUSE_ON_TWIN_CHANGE = frozenset({'begin_task', 'pick_peg', 'place_peg', 'move_peg'})
 
 _POSE_SCHEMA = {
     'type': 'object',
@@ -86,6 +96,16 @@ class InvalidToolInput(ValueError):
     """도구 입력이 그 도구가 내건 스키마에 맞지 않는다 — 로봇에 닿기 전에 거른다."""
 
 
+class TwinChanged(RuntimeError):
+    """트윈이 바뀐 것을 처음 알아챈 동작 호출 — **실행하지 않았다.** 카탈로그는 다시 읽었다."""
+
+    def __init__(self, before: tuple, after: tuple) -> None:
+        self.before = before
+        self.after = after
+        super().__init__(f'twin changed (backend {before[0]!r} -> {after[0]!r}); '
+                         'catalog reloaded, nothing was executed')
+
+
 def _obj_schema(properties: dict[str, Any], required: Sequence[str] = ()) -> dict[str, Any]:
     """도구 입력 스키마를 만든다. MCP 는 최상위가 object 인 스키마를 요구한다."""
     schema: dict[str, Any] = {'type': 'object', 'properties': properties}
@@ -106,6 +126,8 @@ class TwinTools:
         self.twin = twin
         self._catalog: Optional[list[dict[str, Any]]] = None
         self._variable_names: Optional[frozenset[str]] = None
+        # 카탈로그를 읽을 때의 트윈 서명(`_sync_catalog`). 달라지면 카탈로그를 다시 읽는다.
+        self._signature: Optional[tuple] = None
         # 열린 작업의 재현 정보. `end_task` 가 metadata 에 자동으로 합친다 — 에이전트가
         # 배치를 되돌려 주기를 기대하면 잊는 순간 재현 불가능한 에피소드가 남는다.
         self._task: Optional[dict[str, Any]] = None
@@ -126,11 +148,35 @@ class TwinTools:
             self._variable_names = frozenset(v['name'] for v in self.twin.variables())
         return self._variable_names
 
+    def _sync_catalog(self) -> Optional[tuple]:
+        """트윈이 바뀌었으면 캐시한 카탈로그를 버린다. 바뀌었으면 ``(이전, 지금)`` 서명을 돌려준다.
+
+        같은 id 의 트윈을 다른 설정으로 다시 띄우면(예: `--config` 로 백엔드만 바꾼 복사본) 이
+        서버는 연결된 채 **옛 카탈로그**를 쓴다. 출하 트윈은 환경마다 id 가 달라(2026-10-25) 다른
+        환경의 트윈으로 갈아 띄우면 404 로 드러나지만, id 는 설정에서 바꿀 수 있다. 그 카탈로그로
+        `move_linear` 의 프레임
+        보정 여부(`_twin_resolves_frames`)를 정하므로 mock → 펑션베이면 보정이 덧씌워져 그리퍼가
+        10.3 cm 아래를 겨냥하고, 반대면 보정이 빠져 바닥을 판다. peg 도구 노출도 옛 상태로 남는다.
+
+        그래서 트윈 메타(backend · 실행 모드 · 연산 · 변수 이름)를 서명으로 삼아 달라지면 다시
+        읽는다. **이름이 같고 스키마만 바뀐 설정 변경은 못 잡는다** — 그때는 서버를 재시작한다.
+        """
+        meta = self.twin.meta() or {}
+        signature = (meta.get('backend'), meta.get('move_group_mode'),
+                     tuple(meta.get('operations') or ()), tuple(meta.get('variables') or ()))
+        previous, self._signature = self._signature, signature
+        if previous is None or previous == signature:
+            return None
+        self._catalog = None
+        self._variable_names = None
+        return previous, signature
+
     def _peg_supported(self) -> bool:
         """이 트윈에서 peg 도구가 동작하는가 — 고정물 변수를 내놓는지로 본다."""
         return _PEG_REQUIRED_VARIABLE in self._variables()
 
     def list_tools(self) -> list[types.Tool]:
+        self._sync_catalog()
         tools = [
             types.Tool(name=op['name'],
                        description=self._describe(op),
@@ -164,6 +210,11 @@ class TwinTools:
 
     def call(self, name: str, args: dict[str, Any]) -> Any:
         """도구 하나를 실행한다. **블로킹 호출이므로 스레드에서 돈다.**"""
+        if name not in _NO_TWIN_CHECK:
+            changed = self._sync_catalog()
+            acts = name in _OVERRIDES or name in _REFUSE_ON_TWIN_CHANGE or name not in _EXTRA
+            if changed and acts:
+                raise TwinChanged(*changed)
         if name in _PEG_TOOLS and not self._peg_supported():
             # 목록에 없는 도구를 이름으로 직접 부른 경우다. 감춘 연산과 같게 거절하되, 왜
             # 없는지를 알려 준다 — 이 트윈에 고정물이 없으면 peg 작업 자체가 성립하지 않는다.
@@ -331,7 +382,8 @@ class TwinTools:
         """
         pose = args['pose'] if self._twin_resolves_frames() else to_arm_command(args['pose'])
         return move_linear_verified(self.twin, pose,
-                                    tol_m=args.get('tolerance_m', 0.005))
+                                    tol_m=args.get('tolerance_m', 0.005),
+                                    settle_sec=args.get('settle_sec', 10.0))
 
     def _move_to_named_target_verified(self, args: dict[str, Any]) -> Any:
         return move_to_named_target_verified(
@@ -387,15 +439,22 @@ _OVERRIDES: dict[str, dict[str, Any]] = {
             '좌표는 **손끝 기준**이다 — 그리퍼가 실제로 그 지점에 오며, 기하 도구가 '
             '돌려주는 값을 그대로 넣으면 된다. 로봇 내부 프레임 보정은 이 도구가 한다.\n\n'
             '트윈의 raw move_linear 는 경로가 잘려도 성공으로 끝나므로 이 도구를 쓴다. '
-            "반환의 `reached` 가 false 면 목표에 못 갔다는 뜻이며 `error_m` 이 오차다 "
-            '— false 인데 다음 동작을 진행하면 엉뚱한 위치에서 이어진다.\n\n'
+            '기본 10초 동안 새 유효 ee_pose 표본으로 정착을 확인한다. '
+            '정착을 확인하지 못하면 reached=false, reason=SETTLE_TIMEOUT 과 why 를 반환하고 '
+            'error_m 은 없다. 현재 상태를 확인하며 같은 이동을 자동 재시도하지 않는다. '
+            "위치를 비교했을 때는 `error_m` 이 위치 오차다 "
+            '— false 인데 다음 동작을 진행하면 엉뚱한 위치에서 이어진다. '
+            '판정에 쓴 정착 후 관측값은 settled_pose 로 함께 온다 — 현재 위치가 필요하면 '
+            'ee_pose 를 다시 읽지 말고 이것을 쓴다.\n\n'
             '물체를 집을 때는 scene_objects 나 reset_scene 이 돌려준 좌표를 쓰고, '
             'grasp_pose_of_object 로 파지 자세를 만든다. 위에서 접근할 때는 '
             'pose_above 로 만든 지점을 먼저 경유한다.'),
         'schema': _obj_schema(
             {'pose': _POSE_SCHEMA,
              'tolerance_m': {'type': 'number', 'exclusiveMinimum': 0,
-                             'description': '도달 판정 허용 오차(m). 기본 0.005'}},
+                             'description': '도달 판정 허용 오차(m). 기본 0.005'},
+             'settle_sec': {'type': 'number', 'exclusiveMinimum': 0, 'default': 10.0,
+                            'description': '정착 확인 대기 상한(초). 생략 시 10. 0으로 대기를 끌 수 없다'}},
             ['pose']),
         'run': lambda self, a: self._move_linear_verified(a),
     },
@@ -627,6 +686,12 @@ def _error_text(exc: Exception) -> str:
             'NOT_FOUND': ' 이름이 존재하지 않는다. list_state_variables 로 확인한다.',
         }.get(exc.code or '', '')
         return f'{exc}{hint}'
+    if isinstance(exc, TwinChanged):
+        return (f'{exc}\n\n**트윈 환경이 바뀌어 아무것도 실행하지 않았다** '
+                f'(이전 {exc.before[0]} → 지금 {exc.after[0]}). 도구 목록과 좌표 보정 기준은 새로 '
+                "읽었다. 이전 환경에서 읽은 좌표와 계획은 쓰지 않는다 — read_state 로 상태를 다시 "
+                '읽고 계획을 다시 세운 뒤 부른다. 도구 목록이 바뀌었을 수 있으니 필요하면 호스트에서 '
+                'MCP 서버에 다시 연결한다.')
     if isinstance(exc, InvalidToolInput):
         return (f'{exc}\n\n입력이 도구 스키마에 맞지 않아 **아무것도 실행하지 않았다.** 도구 목록의 '
                 '스키마(필수 인자 · 허용 범위 · 타입)를 다시 보고 고쳐서 부른다.')
@@ -781,15 +846,15 @@ async def _serve(tools: TwinTools) -> None:
 
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='MCP server exposing a robot twin')
-    parser.add_argument('--host', default='127.0.0.1')
-    parser.add_argument('--port', type=int, default=8801)
-    parser.add_argument('--twin-id', default='panda01')
+    parser.add_argument('--url', default=DEFAULT_BASE_URL,
+                        help='트윈 서버 루트 URL (http(s)://호스트[:포트])')
+    parser.add_argument('--twin-id', default=DEFAULT_TWIN_ID)
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    tools = TwinTools(RobotTwinClient(host=args.host, port=args.port, twin_id=args.twin_id))
+    tools = TwinTools(RobotTwinClient(base_url=args.url, twin_id=args.twin_id))
     asyncio.run(_serve(tools))
     return 0
 

@@ -37,7 +37,8 @@ import argparse
 import json
 import urllib.error
 
-from robot_twin_client.client import OperationFailed, RobotTwinClient, TwinError
+from robot_twin_client.client import (DEFAULT_BASE_URL, OperationFailed, RobotTwinClient, TwinError,
+                                      WrongBackend, require_backend)
 from robot_twin_client.ops import set_gripper
 from robot_twin_client.pick_n_place import return_home
 from robot_twin_client.stack import (DEFAULT_CLEARANCE_M, DEFAULT_GAP_M, DEFAULT_SCENE,
@@ -67,7 +68,7 @@ def collect_episode(twin: RobotTwinClient, source_name: str, base_name: str, *,
             raise KeyError(f"scene {scene!r} does not place {name!r} (places: {sorted(names)})")
 
     if home and not return_home(twin, home):
-        return {'ok': False, 'seed': seed, 'placed': placed,
+        return {'ok': False, 'seed': seed, 'placed': placed, 'episode': False,
                 'error': f"'{home}' 복귀 실패 — 에피소드를 열지 않는다"}
 
     # 세션 경계는 `outputs` 로 부른다 — 동기 연산이라 `run` 은 `FAILED` 를 예외 없이 돌려주고,
@@ -101,7 +102,8 @@ def collect_episode(twin: RobotTwinClient, source_name: str, base_name: str, *,
     twin.outputs('stop_episode', {'outcome': 'success' if ok else 'failure',
                                   'metadata': metadata})
 
-    result = {'ok': ok, 'seed': seed, 'placed': placed, 'check': check}
+    # `episode` — 경계를 열고 닫는 데까지 성공했다(= 데이터에 에피소드가 하나 남는다).
+    result = {'ok': ok, 'seed': seed, 'placed': placed, 'check': check, 'episode': True}
     if failure:
         result['error'] = failure
     return result
@@ -128,7 +130,7 @@ def collect(twin: RobotTwinClient, source_name: str, base_name: str, *, times: i
                 result = collect_episode(twin, source_name, base_name, scene=scene,
                                          seed=episode_seed, **kwargs)
             except (KeyError, ValueError, TwinError, OperationFailed, TimeoutError) as exc:
-                result = {'ok': False, 'seed': episode_seed,
+                result = {'ok': False, 'seed': episode_seed, 'episode': False,
                           'error': f'{type(exc).__name__}: {exc}'}
                 print(f"    에피소드 경계를 처리하지 못했다: {result['error']}")
             result['index'] = index
@@ -179,9 +181,9 @@ def _close_stale_session(twin: RobotTwinClient) -> None:
 def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description='Collect stacking episodes as learning data (session/episode boundaries)')
-    parser.add_argument('--host', default='127.0.0.1')
-    parser.add_argument('--port', type=int, default=8802)
-    parser.add_argument('--twin-id', default='panda_isaac')
+    parser.add_argument('--url', default=DEFAULT_BASE_URL,
+                        help='트윈 서버 루트 URL (http(s)://호스트[:포트])')
+    parser.add_argument('--twin-id', default='panda01', help='Isaac 트윈의 id')
     parser.add_argument('--source', default='block_a', help='object to pick up')
     parser.add_argument('--base', default='cylinder_a', help='object to stack it on')
     parser.add_argument('--scene', default=DEFAULT_SCENE)
@@ -201,7 +203,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    twin = RobotTwinClient(host=args.host, port=args.port, twin_id=args.twin_id)
+    twin = RobotTwinClient(base_url=args.url, twin_id=args.twin_id)
 
     try:
         health = twin.health()
@@ -210,6 +212,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     if health['move_group'] != 'READY':
         print(f"move_group 미준비: {health.get('move_group_error')}")
+        return 1
+    # 학습 데이터라 끄는 옵션을 두지 않는다 — mock 쌓기는 얹히지 않아 실패 에피소드만 쌓인다.
+    try:
+        require_backend(twin, 'panda_isaac', purpose='쌓기 수집')
+    except WrongBackend as exc:
+        print(exc)
         return 1
     if args.repeat < 1:
         print('--repeat 은 1 이상이어야 한다')
@@ -240,15 +248,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 130
 
     good = [r for r in results if r['ok']]
-    print(f'\n{len(good)}/{len(results)} 회 성공 — 에피소드는 {len(results)} 건 모두 기록됐다')
+    recorded = [r for r in results if r.get('episode')]
+    # **회차 수 = 기록된 에피소드 수가 아니다.** 리셋 · 복귀 · 경계 요청이 실패한 회차는
+    # 에피소드가 없다. 예전에는 늘 "N 건 모두 기록됐다"고 찍고 0 으로 끝나 빠진 것이 안 보였다.
+    print(f'\n{len(results)} 회 중 에피소드 {len(recorded)} 건 기록, 작업 성공 {len(good)} 건')
     if len(good) != len(results):
         print('실패한 회의 seed: '
               + ', '.join(str(r['seed']) for r in results if not r['ok']))
+    missing = [r for r in results if not r.get('episode')]
+    if missing:
+        print('에피소드를 남기지 못한 회의 seed: ' + ', '.join(str(r['seed']) for r in missing))
     if args.summary_json:
         with open(args.summary_json, 'w', encoding='utf-8') as handle:
             json.dump(results, handle, ensure_ascii=False, indent=2)
         print(f'요약: {args.summary_json}')
-    return 0
+    # 작업 실패 에피소드는 정상적인 학습 데이터라 0 이다. 에피소드가 빠진 회차가 있으면 1 —
+    # 무인 수집 스크립트가 종료 코드만 보고도 데이터가 모자란 것을 알게 한다.
+    return 1 if missing else 0
 
 
 if __name__ == '__main__':

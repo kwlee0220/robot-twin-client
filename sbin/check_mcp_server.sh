@@ -2,9 +2,8 @@
 #
 # MCP 서버의 배선을 점검한다 — 서버 기동 + 트윈 연결 + 도구 목록.
 #
-#   ./sbin/check_mcp_server.sh                    # 점검 (기본)
-#   ./sbin/check_mcp_server.sh --port 8802 --twin-id panda_isaac        # 다른 트윈 — **--twin-id 도 준다**
-#   ./sbin/check_mcp_server.sh --port 8803 --twin-id panda_functionbay  # 펑션베이
+#   ./sbin/check_mcp_server.sh                    # 점검 (기본 — rdfp01 · 8801; Isaac 은 --twin-id panda01)
+#   ./sbin/check_mcp_server.sh --url http://127.0.0.1:8802 --twin-id panda02   # 다른 로봇의 트윈 — **--twin-id 도 준다**
 #   ./sbin/check_mcp_server.sh --serve            # stdio 서버로 기동 (거의 쓸 일 없다)
 #
 # **서버를 띄우는 스크립트가 아니다.** MCP 서버는 stdio 로 말하므로

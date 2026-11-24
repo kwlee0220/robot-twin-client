@@ -6,10 +6,9 @@ import math
 
 import pytest
 
-from robot_twin_client.pick_n_place import (
-    DOWN, above_of, center_of, grasp_pose_of, grasp_yaw_of, pick, place,
-    return_home, rotated_about_base_z, yaw_of
-)
+from robot_twin_client.geometry import (DOWN, above_of, center_of, grasp_pose_of, grasp_yaw_of,
+                                        rotated_about_base_z, yaw_of)
+from robot_twin_client.pick_n_place import pick, place, return_home
 
 from conftest import FakeTwin, POSE
 

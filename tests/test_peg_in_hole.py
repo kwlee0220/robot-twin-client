@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+from datetime import datetime, timezone
 
 import math
 
@@ -17,6 +18,17 @@ from robot_twin_client.peg_in_hole import (
     FINGERTIP_OFFSET, GRASP_YAW, PegInHoleError, check_geometry, covers_xy,
     down_with_yaw, floor_at, grasp_height, other_fixture, tilt_deg, top_z,
     vertical_half_extent)
+
+def test_contact_descent_still_stops_when_settling_cannot_be_confirmed(monkeypatch):
+    from robot_twin_client import peg_in_hole
+    monkeypatch.setattr(peg_in_hole, 'move_linear_verified', lambda *a, **kw: {
+        'reached': False, 'reason': 'SETTLE_TIMEOUT', 'why': 'not settled',
+        'result': {'status': 'COMPLETED'}})
+    with pytest.raises(PegInHoleError) as caught:
+        peg_in_hole._go(object(), .5, 0, .03, velocity_scaling=.1, require_reached=False)
+    assert caught.value.holding is True
+    assert 'not settled' in str(caught.value)
+
 
 # 실측값 (2026-09-09, 빌드 MMR-Build_260907)
 HOLE = {'name': 'peg_hole', 'type': 'hole',
@@ -192,6 +204,12 @@ class _FakeTwin:
         self.reads += 1
         z = self.sequence[min(self.reads - 1, len(self.sequence) - 1)]
         return {'pose': {'position': {'x': 0.5, 'y': 0.0, 'z': z}}}
+
+    def read_raw(self, name: str) -> dict:
+        from robot_twin_client import ops
+        return {'quality': 'OK', 'value': self.read(name),
+                'received_at': datetime.fromtimestamp(
+                    ops.time.monotonic(), timezone.utc).isoformat()}
 
 
 def test_wait_until_still_returns_only_after_motion_stops() -> None:

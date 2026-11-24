@@ -78,8 +78,8 @@
       ]
     },
     {
-      // 물체를 집어 다른 물체 위에 얹는다. 기본값이 pick & place 와 다르다 —
-      // 쌓기는 물리가 있어야 뜻이 있어 mock(8801/panda01)이 아니라 Isaac 을 본다.
+      // 물체를 집어 다른 물체 위에 얹는다. 쌓기는 물리가 있어야 뜻이 있어 Isaac 트윈
+      // (트윈 메타의 backend: panda_isaac)이 아니면 시작하지 않는다.
       "name": "쌓기 (기본: cylinder_a → block_a, Isaac)",
       "type": "debugpy",
       "request": "launch",
@@ -88,7 +88,7 @@
       "cwd": "${workspaceFolder}",
       "envFile": "${workspaceFolder}/.env",
       "justMyCode": false,
-      // 인자 없음 = 모듈 기본값(8802 / panda_isaac / cylinder_a → block_a).
+      // 인자 없음 = 모듈 기본값(8801 / panda01 / cylinder_a → block_a).
       // **시작할 때 reset_scene 이 먼저 돈다** — 안 그러면 두 번째 실행이 이미
       // 얹혀 있는 물체를 다시 집어 제자리에 놓는 꼴이 된다. 겹쳐 쌓으려면
       // --no-reset 을 준다.
@@ -148,8 +148,8 @@
       "envFile": "${workspaceFolder}/.env",
       "justMyCode": false,
       "args": [
-        "--port", "8801",
-        "--twin-id", "panda01",
+        // 트윈은 환경과 무관하게 panda01 · 8801 이다 — mock 트윈을 띄워 두고 환경 확인만 끈다.
+        "--any-backend",
         "--source", "${input:stackSource}",
         "--base", "${input:stackBase}",
         // mock 트윈은 씬 레시피 이름이 다르다(two_objects 가 없다). 이미 놓여
@@ -237,14 +237,14 @@
     {
       "id": "stackPort",
       "type": "promptString",
-      "description": "트윈 포트 (쌓기 — Isaac 은 8802)",
-      "default": "8802"
+      "description": "트윈 포트 (쌓기)",
+      "default": "8801"
     },
     {
       "id": "stackTwinId",
       "type": "promptString",
-      "description": "트윈 ID (쌓기 — Isaac 은 panda_isaac)",
-      "default": "panda_isaac"
+      "description": "트윈 ID (쌓기)",
+      "default": "panda01"
     },
     {
       "id": "stackSource",

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from copy import deepcopy
+from datetime import datetime, timezone
 
+from robot_twin_client import ops
 from robot_twin_client.client import OperationFailed
 from robot_twin_client.ops import (failure_why, move_linear_verified,
                                    move_to_named_target_verified, set_gripper)
@@ -167,3 +170,138 @@ def test_unknown_failure_code_has_no_hint() -> None:
     assert failure_why({'error': {'code': 'SOMETHING_NEW'}}) is None
     assert failure_why({'status': 'FAILED'}) is None
     assert failure_why(None) is None
+
+
+class _SamplesTwin(FakeTwin):
+    """응답 목록을 순서대로 읽고 이후에는 마지막 캐시를 반복한다."""
+
+    def __init__(self, samples):
+        super().__init__()
+        self.samples = samples
+        self.reads = 0
+
+    def read_raw(self, name):
+        assert name == 'ee_pose'
+        sample = self.samples[min(self.reads, len(self.samples) - 1)]
+        self.reads += 1
+        return deepcopy(sample)
+
+
+def _sample(t, *, x=0.4, quality='OK', stamp=None):
+    tick = round(t * 10**9)
+    pose = deepcopy(POSE)
+    pose['position']['x'] = x
+    return {'quality': quality, 'value': {'pose': pose},
+            'received_at': datetime.fromtimestamp(t, timezone.utc).isoformat(),
+            'stamp': stamp if stamp is not None else
+            {'sec': tick // 10**9, 'nanosec': tick % 10**9}}
+
+
+@pytest.mark.parametrize('kind', ['cached', 'stale', 'no_data', 'missing_time',
+                                  'bad_time', 'nan_position', 'frozen_source'])
+def test_unusable_or_repeated_samples_never_confirm_settling(kind):
+    samples = [_sample(i * 0.3) for i in range(12)]
+    if kind == 'cached':
+        samples = [samples[0]]
+    for body in samples:
+        if kind == 'stale':
+            body['quality'] = 'STALE'
+        elif kind == 'no_data':
+            body.update(quality='NO_DATA', value=None)
+        elif kind == 'missing_time':
+            body.pop('received_at')
+        elif kind == 'bad_time':
+            body['received_at'] = 'not-a-time'
+        elif kind == 'nan_position':
+            body['value']['pose']['position']['x'] = float('nan')
+        elif kind == 'frozen_source':
+            body['stamp'] = {'sec': 0, 'nanosec': 0}
+    twin = _SamplesTwin(samples)
+    assert ops.wait_until_still(twin, timeout_sec=2) is None
+
+
+@pytest.mark.parametrize('with_stamp', [True, False])
+def test_new_stationary_samples_confirm_settling(with_stamp):
+    samples = [_sample(i * 0.3) for i in range(6)]
+    if not with_stamp:
+        for sample in samples:
+            sample['stamp'] = None
+    twin = _SamplesTwin(samples)
+    result = ops.wait_until_still(twin, timeout_sec=2)
+    assert result == samples[2]['value']
+    assert twin.reads == 3
+
+
+def test_duplicate_polls_do_not_confirm_settling_but_later_new_samples_can():
+    twin = _SamplesTwin([_sample(0)] * 4 + [_sample(0.3), _sample(0.6)])
+    assert ops.wait_until_still(twin, timeout_sec=3) is not None
+    assert twin.reads == 6
+
+
+def test_slow_drift_cannot_accumulate_into_a_false_stop():
+    # 인접 표본 간 변화는 0.2 mm 미만이어도 기준점에서 계속 이동한다.
+    twin = _SamplesTwin([_sample(i * 0.3, x=0.4 + i * 0.00015) for i in range(15)])
+    assert ops.wait_until_still(twin, timeout_sec=3) is None
+
+
+def test_invalid_quality_restarts_the_entire_quiet_interval():
+    twin = _SamplesTwin([_sample(0), _sample(.3), _sample(.6, quality='STALE'),
+                         _sample(.9), _sample(1.2), _sample(1.5)])
+    assert ops.wait_until_still(twin, timeout_sec=3) is not None
+    assert twin.reads == 6
+
+
+@pytest.mark.parametrize('clock', ['receipt', 'source'])
+def test_clock_rewind_restarts_settling(clock):
+    samples = [_sample(t) for t in (10, 10.3, 0, .3, .6)]
+    if clock == 'source':
+        for i, sample in enumerate(samples):
+            sample['received_at'] = _sample(10 + i * .4)['received_at']
+    twin = _SamplesTwin(samples)
+    assert ops.wait_until_still(twin, timeout_sec=3) is not None
+    assert twin.reads == 5
+
+
+def test_settle_timeout_does_not_fall_back_to_a_successful_final_pose():
+    twin = _SamplesTwin([_sample(0)])
+    check = move_linear_verified(twin, POSE, settle_sec=1)
+    assert check['result']['outputs']['final_pose']['pose']['position'] == POSE['position']
+    assert check['reached'] is False
+    assert check['reason'] == 'SETTLE_TIMEOUT'
+    assert 'why' in check and 'error_m' not in check
+    assert 'settled_pose' not in check              # 정착하지 못한 값을 정착값처럼 싣지 않는다
+
+
+def test_settled_observation_replaces_end_of_operation_snapshot():
+    twin = _SamplesTwin([_sample(i * .3, x=.42) for i in range(6)])
+    check = move_linear_verified(twin, POSE, settle_sec=2)
+    assert check['reached'] is False
+    assert check['error_m'] == pytest.approx(.02)
+
+
+def test_settled_pose_is_the_observation_the_verdict_used():
+    """판정에 쓴 정착 후 관측값을 돌려준다 — 종료 시점 스냅샷(`final_pose`)과 다르다.
+
+    없으면 호출자가 `ee_pose` 를 다시 읽어야 하고, 그 사이 값이 바뀌면 판정과 다른 위치로
+    다음 목표를 만든다.
+    """
+    twin = _SamplesTwin([_sample(i * .3, x=.42) for i in range(6)])
+    check = move_linear_verified(twin, POSE, settle_sec=2)
+    assert check['settled_pose']['pose']['position']['x'] == pytest.approx(.42)
+    snapshot = check['result']['outputs']['final_pose']['pose']['position']
+    assert snapshot['x'] == POSE['position']['x']
+
+
+def test_no_settled_pose_without_settling():
+    """`settle_sec=0` 이면 정착을 확인하지 않았으므로 그 이름의 값도 없다."""
+    check = move_linear_verified(FakeTwin(), POSE)
+    assert check['reached'] is True
+    assert 'settled_pose' not in check
+
+
+@pytest.mark.parametrize('settle_sec', [-1, float('nan'), float('inf')])
+def test_invalid_settle_limit_is_rejected_before_command(settle_sec):
+    twin = FakeTwin()
+    with pytest.raises(ValueError, match='settle_sec'):
+        move_linear_verified(twin, POSE, settle_sec=settle_sec)
+    assert twin.calls == []
