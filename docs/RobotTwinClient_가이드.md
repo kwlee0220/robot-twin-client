@@ -154,6 +154,7 @@ twin = RobotTwinClient(
     base_url='http://127.0.0.1:8801',
     twin_id='rdfp01',
     http_timeout_sec=30.0,
+    agent='check_twin',
 )
 
 print(twin.meta())
@@ -162,6 +163,8 @@ print(twin.read_raw('ee_pose'))
 ```
 
 첫 접속에서는 `read_raw()`로 값과 품질·사유를 함께 확인한다. 기동 직후 값이 아직 없으면 `NO_DATA`를 출력하며, 이 품질 상태 자체는 예외로 바뀌지 않는다. 연결 실패 등의 통신 예외는 그대로 전달된다. `read()`의 품질 검사 방식은 3.1절에서 설명한다.
+
+`agent`는 선택 인자다. 요청마다 `User-Agent: robot-twin-client/<버전> (<agent>)` 헤더가 실리고, 트윈은 이 값을 감사 로그에 남긴다. 이름을 주면 로그에서 어느 스크립트·서버가 보낸 요청인지 가를 수 있다. 생략하면 `robot-twin-client/<버전>`만 보낸다. 제공 CLI는 자기 명령 이름(`robot-twin-peg` 등)을, MCP 서버는 `mcp`를 쓴다.
 
 객체 생성 자체는 통신하지 않는다. 서버 주소나 연결 문제가 있으면 첫 API 호출에서 드러난다. API 기본 주소는 `{base_url}/api/v1/robot_twins/{twin_id}`다.
 
@@ -294,7 +297,7 @@ flowchart TB
 | 정착 확인 시간 초과 | `reached=False`, `reason='SETTLE_TIMEOUT'`, `why`, `result` |
 | 정착 확인 생략 후 최종 관측값 없음 | `reached=False`, `why='no final_pose in outputs'`, `result` |
 
-`result`는 트윈의 연산 결과 원문이다. 위치 비교가 수행되지 않은 실패에는 `error_m`이 없으므로 선택 필드는 `.get()`으로 읽는다. 정착 시간 초과 시 종료 시점의 `final_pose`로 대체하지 않는다. 정착 확인을 사용했더라도 `result.outputs.final_pose`는 원래의 종료 시점 관측값이며 갱신되지 않는다. 위치 판정에 사용한 정착 후 관측값은 `settled_pose`로 반환한다. `ee_pose` 변수 값과 같은 형태이므로 위치는 `check['settled_pose']['pose']['position']`으로 읽는다. 정착 후 위치가 필요하면 `ee_pose`를 다시 읽지 말고 이 값을 사용한다. 다시 읽으면 판정 이후 바뀐 값을 얻을 수 있다. `settle_sec=0`이거나 정착 확인에 실패한 경우에는 이 필드가 없다.
+`result`는 트윈의 연산 결과 원문이다. JTC 스택(Isaac)이면 `result.outputs.goal_error`에 트윈이 계산한 목표 대비 잔차(`position_m`·`orientation_rad`, tip 기준)가 함께 온다. 래퍼의 `reached` 판정은 이 값을 쓰지 않고 위와 같이 축별 위치 오차로 한다. JGPC 스택(펑션베이)에는 `goal_error`가 없다. 위치 비교가 수행되지 않은 실패에는 `error_m`이 없으므로 선택 필드는 `.get()`으로 읽는다. 정착 시간 초과 시 종료 시점의 `final_pose`로 대체하지 않는다. 정착 확인을 사용했더라도 `result.outputs.final_pose`는 원래의 종료 시점 관측값이며 갱신되지 않는다. 위치 판정에 사용한 정착 후 관측값은 `settled_pose`로 반환한다. `ee_pose` 변수 값과 같은 형태이므로 위치는 `check['settled_pose']['pose']['position']`으로 읽는다. 정착 후 위치가 필요하면 `ee_pose`를 다시 읽지 말고 이 값을 사용한다. 다시 읽으면 판정 이후 바뀐 값을 얻을 수 있다. `settle_sec=0`이거나 정착 확인에 실패한 경우에는 이 필드가 없다.
 
 기본 `settle_sec=0`은 기존 호출자와의 호환성을 위한 값이다. 정착 확인이 필요한 호출, 특히 개루프 제어에서는 양수로 지정한다. 위치 도달·정착 판정만으로 물체 파지 유지나 작업 성공까지 판정할 수는 없다.
 

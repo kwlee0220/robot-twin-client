@@ -198,7 +198,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    twin = RobotTwinClient(base_url=args.url, twin_id=args.twin_id)
+    twin = RobotTwinClient(base_url=args.url, twin_id=args.twin_id, agent='robot-twin-pick')
 
     # 팔 연산은 MoveGroup 이 준비되어야 시작된다. 그리퍼만 쓸 거라면 불필요하다.
     try:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import importlib.metadata
 import json
 import time
 import urllib.error
@@ -18,6 +19,24 @@ DEFAULT_BASE_URL = 'http://127.0.0.1:8801'
 # 기본으로 붙는 트윈 — 펑션베이 트윈 `rdfp01` (2026-10-25). 출하 트윈은 환경마다 id 가 달라
 # (`rdfp01` · `panda01` · `mock01`) 다른 환경에 붙을 때는 id 를 준다. 틀리면 404 다.
 DEFAULT_TWIN_ID = 'rdfp01'
+
+# 트윈의 감사 로그가 요청마다 `User-Agent` 를 남긴다 (트윈 설계서 8.2). urllib 기본값
+# (`Python-urllib/3.x`)으로는 MCP 서버 · 스크립트 · 다른 클라이언트를 가를 수 없다.
+CLIENT_NAME = 'robot-twin-client'
+
+
+def _client_version() -> str:
+    """설치된 배포판의 버전. 설치하지 않고 소스에서 돌리면 `unknown` 이다."""
+    try:
+        return importlib.metadata.version(CLIENT_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        return 'unknown'
+
+
+def user_agent(agent: Optional[str] = None) -> str:
+    """`robot-twin-client/<버전>` 에 호출 주체(`agent`)를 괄호로 붙인 `User-Agent` 값."""
+    base = f'{CLIENT_NAME}/{_client_version()}'
+    return f'{base} ({agent})' if agent else base
 
 
 def _server_root(base_url: str) -> str:
@@ -122,11 +141,14 @@ class RobotTwinClient:
     """
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, twin_id: str = DEFAULT_TWIN_ID, *,
-                 http_timeout_sec: float = 30.0) -> None:
+                 http_timeout_sec: float = 30.0, agent: Optional[str] = None) -> None:
         """`base_url` 은 트윈 서버의 루트(`http(s)://호스트[:포트]`)다 — API 경로는 넣지 않는다.
 
         `/api/v1/robot_twins/<id>` 는 이 클라이언트가 붙인다. 버전은 클라이언트 코드가 기대하는
         API 이고, id 는 어느 트윈인지를 따로 드러내야 하므로 URL 에 섞지 않는다.
+
+        `agent` 는 호출 주체 이름(`mcp` · `robot-twin-peg` …)이며 `User-Agent` 에 실려 트윈의
+        감사 로그에서 요청을 가르는 데 쓰인다.
         """
         self.base_url = _server_root(base_url)
         self.twin_id = twin_id
@@ -135,6 +157,7 @@ class RobotTwinClient:
         # 10초였을 때 펑션베이 그리퍼(12초)와 `reset_scene`(10초)에서 트윈이 결과를 주기
         # 전에 클라이언트가 소켓 시간 초과로 먼저 끊겼다. 동작은 서버에서 계속된다.
         self.http_timeout_sec = http_timeout_sec
+        self.user_agent = user_agent(agent)
 
     # ----- 저수준 -----
     def _request(self, path: str, method: str = 'GET',
@@ -145,7 +168,9 @@ class RobotTwinClient:
     def _send(self, url: str, method: str = 'GET',
               body: Optional[dict] = None) -> tuple[int, Any]:
         data = None if body is None else json.dumps(body).encode()
-        headers = {'Content-Type': 'application/json'} if data else {}
+        headers = {'User-Agent': self.user_agent}
+        if data:
+            headers['Content-Type'] = 'application/json'
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=self.http_timeout_sec) as res:

@@ -50,7 +50,7 @@
 
 | 연산 | `COMPLETED` 인데 도달 못 하는 경우 | 판정 근거 |
 |---|---|---|
-| `move_linear` | 계획의 60~100% 만 실행돼도 성공으로 끝난다 (`fraction` 은 오지 않음) | `outputs.final_pose` 를 목표와 비교 |
+| `move_linear` | 계획 비율이 `min_fraction`(기본 0.95) 이상이면 부분 경로만 실행돼도 성공으로 끝난다 (비율은 `outputs.fraction`) | `outputs.final_pose` 를 목표와 비교 (JTC 스택은 `outputs.goal_error` 도 온다) |
 | `move_to_named_target` | 관절 공간 계획이라 부분 실행은 없지만, JGPC 스택은 open loop 라 도달 보장이 없다 | `outputs.closed_loop` |
 
 **그리퍼 결과의 이름이 바뀌었다.** 트윈은 이제 `at_goal` / `width` 를 보낸다
@@ -564,9 +564,10 @@ end_task   ─ stop_episode ─ stop_session      ← 한쪽이 실패해도 나
 재시도한다. `RESOURCE_BUSY` → "`get_resource_status` 로 확인하라" 처럼 다음 행동을 붙인다.
 도구 실패는 프로토콜 오류가 아니라 `is_error` 결과로 돌아가 에이전트가 읽고 고칠 수 있다.
 
-**입력은 실행 전에 스키마로 확인한다.** MCP 는 스키마를 클라이언트에 전달할 뿐 검증하지 않고,
-트윈도 `jsonschema` 가 있을 때만 검증하므로 서버가 거른다 — 범위 밖 값(`velocity_scaling: 2.0`)이나
-빠진 필수 인자는 **아무것도 실행하지 않고** `is_error` 로 돌아간다.
+**입력은 실행 전에 스키마로 확인한다.** MCP 는 스키마를 클라이언트에 전달할 뿐 검증하지 않는다.
+트윈도 검증하지만 검증 래퍼 · 추가 도구는 트윈 연산 하나로 대응되지 않으므로 서버가 거른다 —
+범위 밖 값(`velocity_scaling: 2.0`)이나 빠진 필수 인자는 **아무것도 실행하지 않고** `is_error` 로
+돌아간다.
 
 ⚠️ **`is_error: false` 는 로봇 작업의 성공이 아니다.** 연산이 `FAILED` 로 끝나도, 이동이 목표에
 못 갔어도(`reached: false`), 경계를 못 닫았어도(`closed: false`) 결과는 정상 응답으로 온다 —

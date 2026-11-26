@@ -112,7 +112,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    twin = RobotTwinClient(base_url=args.url, twin_id=args.twin_id)
+    twin = RobotTwinClient(base_url=args.url, twin_id=args.twin_id, agent='robot-twin-reset')
     where = f"{args.url.rstrip('/')}/{args.twin_id}"
 
     try:

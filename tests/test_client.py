@@ -122,6 +122,36 @@ def test_http_timeout_outlasts_the_longest_synchronous_operation(monkeypatch) ->
     assert seen[0] > 12.0
 
 
+def _capture_headers(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    seen: list[dict] = []
+
+    def fake_urlopen(req: Any, timeout: float) -> _Response:
+        seen.append({k.lower(): v for k, v in req.header_items()})
+        return _Response()
+
+    monkeypatch.setattr(client_module.urllib.request, 'urlopen', fake_urlopen)
+    return seen
+
+
+def test_requests_carry_a_client_user_agent(monkeypatch) -> None:
+    """트윈 감사 로그가 `User-Agent` 로 요청 주체를 가른다 — urllib 기본값이면 안 된다."""
+    seen = _capture_headers(monkeypatch)
+
+    RobotTwinClient().health()
+
+    assert seen[0]['user-agent'].startswith('robot-twin-client/')
+    assert 'content-type' not in seen[0]           # 본문 없는 GET 에는 붙이지 않는다
+
+
+def test_agent_name_is_appended_and_kept_on_posts(monkeypatch) -> None:
+    seen = _capture_headers(monkeypatch)
+
+    RobotTwinClient(agent='mcp')._request('/operations/x', 'POST', {'inputs': {}})
+
+    assert seen[0]['user-agent'].endswith(' (mcp)')
+    assert seen[0]['content-type'] == 'application/json'
+
+
 def test_http_timeout_can_be_raised(monkeypatch) -> None:
     seen = _capture_timeouts(monkeypatch)
 

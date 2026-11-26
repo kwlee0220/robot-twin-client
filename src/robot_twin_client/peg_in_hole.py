@@ -594,7 +594,7 @@ def main(argv: Optional[list] = None) -> int:
                         help='시작·끝의 ready 복귀를 생략한다')
     args = parser.parse_args(argv)
 
-    twin = RobotTwinClient(base_url=args.url, twin_id=args.twin)
+    twin = RobotTwinClient(base_url=args.url, twin_id=args.twin, agent='robot-twin-peg')
     # 고정물은 펑션베이 트윈만 낸다. id 는 설정에서 바꿀 수 있어 환경 판정의 근거가 못 되므로
     # **능력(`fixtures` 변수)으로** 확인한다 — MCP 의 peg 도구와 같은 기준이다.
     meta = twin.meta()

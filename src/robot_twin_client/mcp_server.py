@@ -854,7 +854,7 @@ def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
-    tools = TwinTools(RobotTwinClient(base_url=args.url, twin_id=args.twin_id))
+    tools = TwinTools(RobotTwinClient(base_url=args.url, twin_id=args.twin_id, agent='mcp'))
     asyncio.run(_serve(tools))
     return 0
 
