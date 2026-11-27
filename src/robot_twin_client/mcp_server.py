@@ -388,7 +388,9 @@ class TwinTools:
     def _move_to_named_target_verified(self, args: dict[str, Any]) -> Any:
         return move_to_named_target_verified(
             self.twin, args['target'],
-            velocity_scaling=args.get('velocity_scaling', 0.3))
+            velocity_scaling=args.get('velocity_scaling', 0.3),
+            settle_sec=args.get('settle_sec', 10.0),
+            tol_rad=args.get('tolerance_rad', 0.01))
 
 
 # ----------------------------------------------------------------------
@@ -463,12 +465,19 @@ _OVERRIDES: dict[str, dict[str, Any]] = {
             '팔을 사전 정의된 이름 자세로 옮긴 뒤 도달 여부를 판정한다.\n\n'
             "쓸 수 있는 이름은 read_state('named_targets') 로 확인한다 — 이름을 지어내면 "
             '계획 단계까지 가서 FAILED 로 돌아온다.\n\n'
-            '반환의 `reached` 가 false 이고 `why` 가 open loop 이면, 명령 스트리밍 방식이라 '
-            '정상 종료해도 도달 보장이 없다는 뜻이다(실패가 아니다). 확실히 알아야 하면 '
-            "read_state('ee_pose') 로 확인한다."),
+            '트윈이 정착 대기를 지원하면 팔이 멈출 때까지(기본 10초 상한) 기다린 뒤 목표 '
+            '관절값과의 차를 `error_rad` 로 돌려주고, 그것이 허용 오차 안이면 `reached` 가 '
+            'true 다. 멈추지 않으면 reached=false, reason=SETTLE_TIMEOUT 이다.\n\n'
+            '정착 대기를 지원하지 않는 트윈에서 `reached` 가 false 이고 `why` 가 open loop 이면, '
+            '명령 스트리밍 방식이라 정상 종료해도 도달 보장이 없다는 뜻이다(실패가 아니다). '
+            "확실히 알아야 하면 read_state('ee_pose') 로 확인한다."),
         'schema': _obj_schema(
             {'target': {'type': 'string', 'description': "SRDF named target (예: 'ready')"},
-             'velocity_scaling': {'type': 'number', 'minimum': 0.01, 'maximum': 1.0}},
+             'velocity_scaling': {'type': 'number', 'minimum': 0.01, 'maximum': 1.0},
+             'tolerance_rad': {'type': 'number', 'exclusiveMinimum': 0,
+                               'description': '도달 판정 허용 오차(rad, 관절 최대 차). 기본 0.01'},
+             'settle_sec': {'type': 'number', 'minimum': 0, 'default': 10.0,
+                            'description': '정착 확인 대기 상한(초). 생략 시 10. 0 이면 기다리지 않는다'}},
             ['target']),
         'run': lambda self, a: self._move_to_named_target_verified(a),
     },

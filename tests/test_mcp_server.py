@@ -452,6 +452,17 @@ def test_failed_operation_text_tells_the_agent_how_to_recover(code, expected):
     assert expected in text
 
 
+def test_failed_operation_text_names_the_moveit_cause():
+    """`PLANNING_FAILED` 만으로는 시작 자세 문제인지 목표 문제인지 모른다 — 원인을 함께 준다."""
+    exc = OperationFailed('move_linear', {'status': 'FAILED', 'error': {
+        'code': 'PLANNING_FAILED', 'message': 'x',
+        'details': {'moveit_error_code': -10, 'moveit_error_name': 'START_STATE_IN_COLLISION'}}})
+    text = _error_text(exc)
+
+    assert 'START_STATE_IN_COLLISION' in text
+    assert '목표를 바꿔도 결과가 같다' in text
+
+
 def test_raw_operation_failure_carries_a_hint():
     """카탈로그에서 자동 생성된 도구도 실패하면 다음 행동이 붙는다."""
     tools, _ = _tools(failures={'stop_session': 'PRECONDITION_FAILED'})

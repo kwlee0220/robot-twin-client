@@ -305,3 +305,178 @@ def test_invalid_settle_limit_is_rejected_before_command(settle_sec):
     with pytest.raises(ValueError, match='settle_sec'):
         move_linear_verified(twin, POSE, settle_sec=settle_sec)
     assert twin.calls == []
+
+
+# ----- 트윈이 정착을 기다려 주는 경우 (`settle_timeout_sec`, 트윈 설계서 6.7) ---------
+
+class _SettlingTwin(FakeTwin):
+    """이동 연산이 `settle_timeout_sec` 를 받는 트윈. 정착 결과를 정해 둔다."""
+
+    def __init__(self, *, settled: bool = True, joint_error=0.002, **kwargs):
+        super().__init__(**kwargs)
+        self._settled = settled
+        self._joint_error = joint_error
+        self.raw_reads = 0
+
+    def operations(self) -> list:
+        catalog = deepcopy(super().operations())
+        for op in catalog:
+            if op['name'] in ('move_linear', 'move_to_named_target'):
+                op['inputs_schema']['properties'][ops.SETTLE_INPUT] = {'type': 'number'}
+        return catalog
+
+    def run(self, operation, inputs=None):
+        state = super().run(operation, inputs)
+        if operation in ('move_linear', 'move_to_named_target') and \
+                (inputs or {}).get(ops.SETTLE_INPUT):
+            outputs = dict(state.get('outputs') or {})
+            outputs['settled'] = self._settled
+            if self._settled:
+                outputs['settle_ms'] = 640
+                if operation == 'move_to_named_target' and self._joint_error is not None:
+                    outputs['goal_error'] = {'joint_max_rad': self._joint_error}
+            state = {**state, 'outputs': outputs}
+        return state
+
+    def read_raw(self, name):
+        self.raw_reads += 1
+        return super().read_raw(name)
+
+
+def test_linear_hands_the_wait_to_a_twin_that_settles():
+    """트윈이 기다리면 클라이언트는 폴링하지 않고 결과의 정착 시점 값을 쓴다."""
+    twin = _SettlingTwin()
+    check = move_linear_verified(twin, POSE, settle_sec=5)
+
+    assert twin.calls[0][1][ops.SETTLE_INPUT] == 5
+    assert twin.raw_reads == 0
+    assert check['reached'] is True
+    assert check['settled_pose'] == check['result']['outputs']['final_pose']
+
+
+def test_linear_reports_settle_timeout_from_the_twin():
+    twin = _SettlingTwin(settled=False)
+    check = move_linear_verified(twin, POSE, settle_sec=5)
+
+    assert check['reached'] is False
+    assert check['reason'] == 'SETTLE_TIMEOUT'
+    assert 'settled_pose' not in check and 'error_m' not in check
+    assert twin.raw_reads == 0
+
+
+def test_old_twin_never_receives_the_new_input():
+    """옛 트윈은 모르는 입력을 400 으로 거부한다 — 카탈로그에 없으면 보내지 않는다."""
+    twin = FakeTwin()
+    move_linear_verified(twin, POSE, settle_sec=1)
+    assert ops.SETTLE_INPUT not in twin.calls[0][1]
+
+
+def test_no_settle_input_without_settle_sec():
+    twin = _SettlingTwin()
+    move_linear_verified(twin, POSE)
+    assert ops.SETTLE_INPUT not in twin.calls[0][1]
+
+
+@pytest.mark.parametrize('error, reached', [(0.002, True), (0.05, False)])
+def test_named_target_judges_open_loop_by_joint_error_once_settled(error, reached):
+    """open loop 여도 트윈이 정착 후 관절 오차를 주면 그것으로 판정한다."""
+    twin = _SettlingTwin(closed_loop=False, joint_error=error)
+    check = move_to_named_target_verified(twin, 'ready', settle_sec=5, tol_rad=0.01)
+
+    assert twin.calls[0][1][ops.SETTLE_INPUT] == 5
+    assert check['reached'] is reached
+    assert check['error_rad'] == pytest.approx(error)
+
+
+def test_named_target_settle_timeout():
+    twin = _SettlingTwin(closed_loop=False, settled=False)
+    check = move_to_named_target_verified(twin, 'ready', settle_sec=5)
+    assert check['reached'] is False
+    assert check['reason'] == 'SETTLE_TIMEOUT'
+
+
+def test_named_target_without_joint_error_is_not_reached():
+    twin = _SettlingTwin(joint_error=None)
+    check = move_to_named_target_verified(twin, 'ready', settle_sec=5)
+    assert check['reached'] is False
+    assert 'goal_error' in check['why']
+
+
+def test_named_target_keeps_the_old_rule_on_an_old_twin():
+    twin = FakeTwin(closed_loop=False)
+    check = move_to_named_target_verified(twin, 'ready', settle_sec=5)
+    assert ops.SETTLE_INPUT not in twin.calls[0][1]
+    assert 'open loop' in check['why']
+
+
+@pytest.mark.parametrize('field', ['settle_sec', 'tol_rad'])
+def test_named_target_rejects_bad_limits_before_command(field):
+    twin = FakeTwin()
+    with pytest.raises(ValueError, match=field):
+        move_to_named_target_verified(twin, 'ready', **{field: float('nan')})
+    assert twin.calls == []
+
+
+# ----- MoveIt 원본 오류 (`error.details.moveit_error_name`, 트윈 설계서 6.8) -----------
+
+def _failed(code: str, details=None) -> dict:
+    error = {'code': code, 'message': 'x'}
+    if details is not None:
+        error['details'] = details
+    return {'status': 'FAILED', 'error': error}
+
+
+def test_moveit_cause_refines_the_code_hint() -> None:
+    """`PLANNING_FAILED` 만으로는 시작 자세 문제와 목표 문제가 같아 보인다 — 원인이 대응을 가른다."""
+    start = failure_why(_failed('PLANNING_FAILED', {'moveit_error_code': -10,
+                                                    'moveit_error_name': 'START_STATE_IN_COLLISION'}))
+    goal = failure_why(_failed('PLANNING_FAILED', {'moveit_error_code': -12,
+                                                   'moveit_error_name': 'GOAL_IN_COLLISION'}))
+    assert '움직이지 않았다' in start and '움직이지 않았다' in goal
+    assert 'START_STATE_IN_COLLISION' in start and '목표를 바꿔도 결과가 같다' in start
+    assert 'GOAL_IN_COLLISION' in goal and '목표를 물체' in goal
+
+
+def test_unknown_moveit_name_is_still_reported() -> None:
+    why = failure_why(_failed('PLANNING_FAILED', {'moveit_error_code': -29, 'moveit_error_name': 'CRASH'}))
+    assert why.endswith('MoveIt 원인 CRASH')
+
+
+def test_moveit_code_without_a_name_is_reported_as_a_number() -> None:
+    assert ops.moveit_error_of(_failed('PLANNING_FAILED', {'moveit_error_code': -9999})) == 'error_code=-9999'
+
+
+def test_no_details_means_no_moveit_cause() -> None:
+    assert ops.moveit_error_of(_failed('PLANNING_FAILED')) is None
+    assert ops.moveit_error_of(_failed('INVALID_INPUT', [{'loc': ['body']}])) is None   # 400 의 목록형 details
+    assert failure_why(_failed('PLANNING_FAILED')) == ops.FAILURE_HINTS['PLANNING_FAILED']
+
+
+def test_moveit_cause_alone_still_gives_a_hint() -> None:
+    """모르는 트윈 코드라도 MoveIt 원인을 알면 안내한다."""
+    why = failure_why(_failed('SOMETHING_NEW', {'moveit_error_name': 'NO_IK_SOLUTION'}))
+    assert why.startswith('MoveIt 원인 NO_IK_SOLUTION')
+
+
+class _MoveItFailTwin(FakeTwin):
+    def run(self, operation, inputs=None):
+        self.calls.append((operation, inputs or {}))
+        return _failed('PLANNING_FAILED', {'moveit_error_code': -31, 'moveit_error_name': 'NO_IK_SOLUTION'})
+
+
+@pytest.mark.parametrize('move', [lambda t: move_linear_verified(t, POSE),
+                                  lambda t: move_to_named_target_verified(t, 'ready')])
+def test_verified_moves_expose_the_moveit_cause(move) -> None:
+    check = move(_MoveItFailTwin())
+    assert check['reached'] is False
+    assert check['moveit_error'] == 'NO_IK_SOLUTION'
+    assert 'IK 해가 없다' in check['why']
+
+
+def test_operation_failed_message_names_the_moveit_cause() -> None:
+    exc = OperationFailed('move_linear', _failed('PLANNING_FAILED', {'moveit_error_code': -12,
+                                                                     'moveit_error_name': 'GOAL_IN_COLLISION'}))
+    assert exc.moveit_error == 'GOAL_IN_COLLISION'
+    assert 'PLANNING_FAILED(GOAL_IN_COLLISION)' in str(exc)
+    plain = OperationFailed('move_linear', _failed('EXECUTION_ABORTED'))
+    assert plain.moveit_error is None and 'EXECUTION_ABORTED: x' in str(plain)

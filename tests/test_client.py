@@ -335,3 +335,22 @@ def test_require_backend_rejects_a_twin_that_does_not_say() -> None:
 
     with pytest.raises(client_module.WrongBackend, match='옛 트윈'):
         client_module.require_backend(twin, 'panda_isaac', purpose='쌓기')
+
+
+def test_accepts_input_reads_the_catalog_once(monkeypatch) -> None:
+    """카탈로그는 기동 뒤 안 바뀐다 — 이동마다 `/operations` 를 다시 읽지 않는다."""
+    from robot_twin_client.client import RobotTwinClient
+
+    twin = RobotTwinClient('http://127.0.0.1:1')
+    calls = []
+
+    def _operations():
+        calls.append(1)
+        return [{'name': 'move_linear',
+                 'inputs_schema': {'properties': {'pose': {}, 'settle_timeout_sec': {}}}}]
+
+    monkeypatch.setattr(twin, 'operations', _operations)
+    assert twin.accepts_input('move_linear', 'settle_timeout_sec') is True
+    assert twin.accepts_input('move_linear', 'frame') is False
+    assert twin.accepts_input('move_to_joints', 'settle_timeout_sec') is False
+    assert len(calls) == 2

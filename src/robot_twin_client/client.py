@@ -80,9 +80,16 @@ class OperationFailed(Exception):
         self.operation = operation
         self.status = state.get('status')
         self.code = err.get('code')
+        # MoveIt 원본 오류 이름 (트윈 설계서 6.8). MoveIt 이 코드를 주지 않은 실패면 None.
+        details = err.get('details') if isinstance(err.get('details'), dict) else {}
+        self.moveit_error = details.get('moveit_error_name') or (
+            f"error_code={details['moveit_error_code']}" if 'moveit_error_code' in details else None)
         self.state = state
         detail = err.get('message') or '트윈이 사유를 주지 않았다'
-        code = f'{self.code}: ' if self.code else ''
+        code = f'{self.code}' if self.code else ''
+        if self.moveit_error:
+            code += f'({self.moveit_error})'
+        code = f'{code}: ' if code else ''
         super().__init__(f"'{operation}' {self.status}: {code}{detail}")
 
 
@@ -223,6 +230,23 @@ class RobotTwinClient:
     def operations(self) -> list:
         """연산 카탈로그 (이름·설명·inputs_schema·점유 자원)."""
         return self._request('/operations')[1]['operations']
+
+    def accepts_input(self, operation: str, name: str) -> bool:
+        """연산이 그 입력을 받는가 — 카탈로그의 `inputs_schema` 로 본다.
+
+        트윈은 이동 연산의 스키마를 `additionalProperties: false` 로 두므로 모르는 입력을
+        보내면 `400` 이다. 새 입력(`settle_timeout_sec` 등)을 옛 트윈에 보내지 않으려고
+        먼저 묻는다. 카탈로그는 트윈 기동 뒤 바뀌지 않으므로 한 번만 읽는다.
+        """
+        cache = self.__dict__.setdefault('_input_cache', {})
+        if operation not in cache:
+            props: set = set()
+            for op in self.operations():
+                if op.get('name') == operation:
+                    props = set(((op.get('inputs_schema') or {}).get('properties') or {}))
+                    break
+            cache[operation] = props
+        return name in cache[operation]
 
     def resources(self) -> dict:
         return self._request('/resources')[1]

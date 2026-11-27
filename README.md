@@ -51,7 +51,7 @@
 | 연산 | `COMPLETED` 인데 도달 못 하는 경우 | 판정 근거 |
 |---|---|---|
 | `move_linear` | 계획 비율이 `min_fraction`(기본 0.95) 이상이면 부분 경로만 실행돼도 성공으로 끝난다 (비율은 `outputs.fraction`) | `outputs.final_pose` 를 목표와 비교 (JTC 스택은 `outputs.goal_error` 도 온다) |
-| `move_to_named_target` | 관절 공간 계획이라 부분 실행은 없지만, JGPC 스택은 open loop 라 도달 보장이 없다 | `outputs.closed_loop` |
+| `move_to_named_target` | 관절 공간 계획이라 부분 실행은 없지만, JGPC 스택은 open loop 라 도달 보장이 없다 | `outputs.closed_loop`, 또는 `settle_sec` 로 트윈이 정착을 기다렸으면 `outputs.goal_error.joint_max_rad` |
 
 **그리퍼 결과의 이름이 바뀌었다.** 트윈은 이제 `at_goal` / `width` 를 보낸다
 (`rdfp_msgs/GripperState`). 옛 이름 `reached_goal` / `position` 만 읽으면
@@ -84,6 +84,13 @@ require_grasp=False)`) 로 건너뛴다 — 경고를 찍고 진행한다. **실
 | `PLANNING_FAILED` | 움직이지 않았다 | 같은 목표로는 결과가 같다 — 목표나 시작 자세를 바꾼다 |
 | `EXECUTION_ABORTED` | 경로 중간일 수 있다 | `ee_pose` 로 위치부터 확인한다 |
 | `TIMEOUT` | 아직 움직이는 중일 수 있다 | `ee_pose` 로 위치부터 확인한다 |
+
+**트윈이 MoveIt 원본 오류를 주면 원인별 안내를 덧붙인다.** 트윈은 MoveIt 이 코드를 준 실패에
+`error.details.moveit_error_name` 을 싣는다(예: `START_STATE_IN_COLLISION`, `GOAL_IN_COLLISION`,
+`NO_IK_SOLUTION`). `PLANNING_FAILED` 하나로는 시작 자세 문제와 목표 문제가 같아 보이지만 대응이 다르다 —
+시작 자세가 충돌이면 목표를 바꿔도 소용없다. `why` 는 코드 안내 뒤에 `MoveIt 원인 <이름>: <안내>` 를
+붙이고(정본은 `ops.MOVEIT_HINTS`), 검증 헬퍼는 그 이름을 `moveit_error` 로도 돌려주며,
+`OperationFailed` 는 메시지에 `PLANNING_FAILED(GOAL_IN_COLLISION)` 처럼 싣고 `moveit_error` 속성을 둔다.
 
 ### 좌표는 손끝(TCP) 기준이다
 
@@ -595,7 +602,7 @@ Java 라이브러리 [`mdt-robot-client`](../../mdt/mdt-robot-client/README.md)�
 
 | Python 함수 | Java 연산 | 차이 |
 |---|---|---|
-| `ops.move_linear_verified()` | `MoveLinear` | Python은 이동 뒤 정착 대기까지 포함한다. Java는 이동과 위치 판정(`MoveCheck`)만 하며, 정착은 `WaitUntilArmStill`로 확인한다. |
+| `ops.move_linear_verified()` | `MoveLinear` | Python은 이동 뒤 정착 대기까지 포함한다(트윈이 `settle_timeout_sec`를 받으면 트윈에 맡긴다). Java는 이동과 위치 판정(`MoveCheck`)만 하며, 정착은 `WaitUntilArmStill`로 확인한다. |
 | `ops.move_to_named_target_verified()` | `MoveToNamedTarget` | Java에도 `Ops.moveToNamedTargetVerified()`가 있다. |
 | `twin.run('move_to_joints', …)` | `MoveToJoints` | Python에는 전용 함수가 없다. |
 | `ops.set_gripper()` | `MoveGripperToNamedTarget` | Java는 `at_goal`만 판정에 사용한다. |

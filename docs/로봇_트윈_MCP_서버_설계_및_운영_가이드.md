@@ -236,7 +236,7 @@ GET /operations (mock · Isaac 11개 / 펑션베이 10개)
 | 도구 | 이유 |
 |---|---|
 | `move_linear` | 계획의 일부만 실행돼도 `COMPLETED` 로 끝난다. `ops.move_linear_verified`가 새 관측값으로 정착을 확인한 뒤 목표 위치와 비교해 `reached`를 판정한다(범위는 §4.1). 좌표는 TCP 기준으로 받고 프레임 처리는 이 래퍼가 맡는다 |
-| `move_to_named_target` | JGPC · 펑션베이 스택은 open loop 라 정상 종료해도 도달 보장이 없다. `outputs.closed_loop` 로 판정하고, 판정 불가면 `why` 로 사유를 돌려준다 |
+| `move_to_named_target` | JGPC · 펑션베이 스택은 open loop 라 정상 종료해도 도달 보장이 없다. 트윈이 정착 대기(`settle_timeout_sec`)를 지원하면 정착 후 목표 관절값과의 차(`error_rad`)로 판정하고, 지원하지 않으면 `outputs.closed_loop` 로 판정하며 판정 불가면 `why` 로 사유를 돌려준다 |
 
 **감춘 연산**
 
@@ -369,7 +369,7 @@ sequenceDiagram
 |---|---|---|---|
 | MCP `isError` | 모든 도구 | 도구가 결과를 내지 못했다 — 거절 · 입력 검증 실패 · 트윈 4xx/5xx · 통신 오류 · 예외로 끝나는 절차(작업 경계를 못 연 `begin_task`, peg 실패) | `false` 여도 **작업 성공은 아니다** — 아래 필드를 본다 |
 | `status` | 자동 생성 도구 (트윈 연산 세션을 그대로 돌려준다) | 연산의 종료 상태 | `COMPLETED`. `FAILED` 면 `error.code` 와 `why` 를 읽는다 — **이때도 `isError` 는 `false` 다** |
-| `reached` · `error_m` · `reason` · `why` · `settled_pose` | `move_linear` · `move_to_named_target` | 도달 판정. `settled_pose` 는 `move_linear` 가 정착을 확인했을 때 판정에 쓴 관측값 | `reached: true`. 연산이 `FAILED` 여도 예외가 아니라 `reached: false` 로 온다. `move_to_named_target` 은 open loop 스택에서 `false` + `why` 가 정상일 수 있다 |
+| `reached` · `error_m` · `error_rad` · `reason` · `why` · `settled_pose` | `move_linear` · `move_to_named_target` | 도달 판정. `settled_pose` 는 `move_linear` 가 정착을 확인했을 때 판정에 쓴 관측값, `error_rad` 는 `move_to_named_target` 이 트윈의 정착 판정 뒤 받은 관절 최대 오차 | `reached: true`. 연산이 `FAILED` 여도 예외가 아니라 `reached: false` 로 온다. 정착 대기를 지원하지 않는 트윈에서 `move_to_named_target` 은 open loop 스택이면 `false` + `why` 가 정상일 수 있다 |
 | `closed` · `errors` | `end_task` | 에피소드 · 세션 종료 결과 | `closed: true`. `false` 면 `errors` 에 어느 쪽이 실패했는지 있다 |
 | `warnings` | `begin_task` | 서버가 직전 작업이나 남은 세션을 대신 닫았다 | 비어 있으면 깨끗하게 시작했다 (§3.5) |
 | `seated` · `error_m` | `place_peg` · `move_peg` | 삽입 판정 | **성공일 때만 온다.** 앉지 않으면 `isError: true` 이고, 문장이 쥔 채 멈췄는지를 알려 준다 |
@@ -413,7 +413,7 @@ sequenceDiagram
 | peg 실패 — 쥔 채 멈춤 | 같은 호출을 재시도하지 않는다. 그리퍼를 열면 물체를 잃으므로 판단이 서지 않으면 사람에게 알린다 |
 | peg 실패 — 움직이기 전 | 로봇 상태는 안전하다 |
 
-**접수 뒤 실패**(`FAILED`)는 코드별 다음 행동을 붙인다 — 정본은 클라이언트의 `ops.FAILURE_HINTS` 이고, 검증 래퍼의 `why`, 자동 생성 도구 결과의 `why`, 작업 경계의 오류 문장이 같은 문장을 쓴다.
+**접수 뒤 실패**(`FAILED`)는 코드별 다음 행동을 붙인다 — 정본은 클라이언트의 `ops.FAILURE_HINTS` 이고, 검증 래퍼의 `why`, 자동 생성 도구 결과의 `why`, 작업 경계의 오류 문장이 같은 문장을 쓴다. 트윈이 MoveIt 원본 오류(`error.details.moveit_error_name`)를 주면 그 뒤에 `MoveIt 원인 <이름>: <안내>` 를 덧붙인다(정본 `ops.MOVEIT_HINTS`) — `PLANNING_FAILED` 라도 시작 자세가 충돌이면 목표를 바꿔도 소용없으므로, 에이전트가 목표만 바꿔 재시도하는 것을 막는다.
 
 | 코드 | 덧붙이는 안내 |
 |---|---|
@@ -544,15 +544,18 @@ flowchart LR
 | 비교하는 값 | 연산 정상 종료 후 정착 확인에 성공한 새 `ee_pose` 관측값 |
 | 정착 확인 실패 | `reached=False`, `reason=SETTLE_TIMEOUT`. 이전 `final_pose`로 대체하지 않음 |
 
-MCP의 `move_linear`는 **기본 `settle_sec=10.0`**을 검증 헬퍼에 전달한다. 도구 인자로 양수를 지정할 수 있고 0은 입력 검증에서 거부된다. 이는 고정 10초 대기가 아니라 정착 확인을 시도하는 상한이며, 정착을 빨리 확인하면 먼저 반환한다.
+MCP의 `move_linear`는 **기본 `settle_sec=10.0`**을 검증 헬퍼에 전달한다. 도구 인자로 양수를 지정할 수 있고 0은 입력 검증에서 거부된다. 이는 고정 10초 대기가 아니라 정착 확인을 시도하는 상한이며, 정착을 빨리 확인하면 먼저 반환한다. MCP의 `move_to_named_target`도 기본 `settle_sec=10.0`을 넘기며, 이쪽은 0을 받아 정착 확인을 끌 수 있다.
+
+**트윈이 이동 연산에서 `settle_timeout_sec` 입력을 받으면 정착 확인을 트윈이 한다** — 헬퍼가 그 입력으로 `settle_sec`를 넘기고 결과의 `settled`와 정착 시점 `final_pose`를 쓴다. 판정 기준(허용량·머무는 시간)은 백엔드 프로파일이 정하며 자세 회전도 본다. 받지 않는 옛 트윈이면 아래 클라이언트 쪽 확인으로 떨어진다. 지원 여부는 연산 카탈로그의 입력 스키마로 한 번 확인한다.
 
 | 호출 경로 | 정착 확인 |
 |---|---|
 | 기반 라이브러리 `move_linear_verified()` 직접 호출 | 기본 0으로 생략. 호출자가 양수를 지정 |
 | MCP 일반 `move_linear` | 기본 10초. 양수로 변경 가능하며 생략 불가 |
+| MCP 일반 `move_to_named_target` | 기본 10초. 0이면 생략 (트윈이 정착 대기를 지원할 때만 쓰인다) |
 | MCP peg 도구 내부의 이동 | `peg_in_hole`의 15초 설정 사용 |
 
-정착 확인에는 `quality=OK`인 유한한 위치, 증가하는 `received_at`, 제공되는 경우 증가하는 `stamp`가 필요하다. 동일 캐시만 반복해서 읽어서는 성공하지 않는다. 새 표본의 위치가 구간 시작점에서 각 축 0.0002 m 이내로 머물고, 로컬 경과 시간과 수신 시각 차이가 모두 0.6초 이상이어야 한다. 무효 표본·시각 역행 등의 처리와 세부 규약은 [기반 가이드의 정착 확인](RobotTwinClient_가이드.md#42-정착-확인)을 참고한다.
+클라이언트 쪽 정착 확인에는 `quality=OK`인 유한한 위치, 증가하는 `received_at`, 제공되는 경우 증가하는 `stamp`가 필요하다. 동일 캐시만 반복해서 읽어서는 성공하지 않는다. 새 표본의 위치가 구간 시작점에서 각 축 0.0002 m 이내로 머물고, 로컬 경과 시간과 수신 시각 차이가 모두 0.6초 이상이어야 한다. 무효 표본·시각 역행 등의 처리와 세부 규약은 [기반 가이드의 정착 확인](RobotTwinClient_가이드.md#42-정착-확인)을 참고한다.
 
 정착 실패는 움직임 지속뿐 아니라 관측 중단·품질 저하·시각 누락으로도 발생한다. **이 결과는 정지 명령이나 연산 취소가 아니다.** 같은 이동을 자동 재시도하지 말고 현재 상태부터 확인한다. Peg 삽입의 접촉 구간은 위치 오차를 허용할 수 있지만 정착 확인 실패는 허용하지 않으며, 절차 예외로 종료되어 MCP에는 `isError=true`로 전달된다.
 
@@ -564,11 +567,11 @@ MCP의 `move_linear`는 **기본 `settle_sec=10.0`**을 검증 헬퍼에 전달�
 |---|---|---|---|---|
 | HTTP 요청 하나 (`RobotTwinClient(http_timeout_sec=)`) | 30초 | 그 요청의 응답을 포기한다. **동기 연산의 `sync_timeout_sec` 보다 길어야 한다** — 동기 연산은 POST 응답이 그 뒤에 온다 | 보내지 않는다 | 보장 없음 |
 | 비동기 연산 폴링 (`RobotTwinClient.run(timeout_sec=)`) | 120초 | `TimeoutError` (오류 문장이 `ee_pose` 확인을 시킨다) | 보내지 않는다 | 보장 없음 — 로봇은 계속 움직일 수 있다 |
-| MCP 직선 이동의 정착 확인 (`settle_sec`) | 10초 | `reached=False`, `reason=SETTLE_TIMEOUT` | 보내지 않는다 | 보장 없음 — 관측 중단일 수도 있음 |
+| MCP 이동의 정착 확인 (`settle_sec`) | 10초 | `reached=False`, `reason=SETTLE_TIMEOUT` | 보내지 않는다 | 보장 없음 — 관측 중단일 수도 있음 |
 | MCP 호스트의 도구 호출 타임아웃 | 호스트 설정 | 에이전트가 결과를 못 받는다. 서버의 작업 스레드는 계속 돈다 | 보내지 않는다 | 보장 없음 |
 | 트윈 감시기 (`max_duration_sec`, 연산별) | 연산 설정 | 연산 세션을 `FAILED` + `TIMEOUT` 으로 끝낸다 | **팔 컨트롤러에 정지를 보낸다** (MoveGroup 연산만) | 요청일 뿐 확정은 아니다. 그리퍼는 멈추지 않는다 |
 
-클라이언트의 HTTP·폴링·정착 확인과 MCP 호스트의 시간 초과는 **기다림만 끝낸다**. 트윈 쪽 정지 수단은 [로봇 트윈 사용자 가이드](../../../ros/rdfp_ws/docs/twin/로봇_트윈_사용자_가이드.md)를 참고한다. 진행 중인 HTTP 요청 때문에 실제 반환 시간이 폴링·정착 상한을 넘을 수 있다. `settle_sec`는 연산 종료 후의 대기이므로 연산 실행 제한이나 호스트 제한을 늘리지 않는다. 호스트의 제한도 전체 대기 시간을 감안해 설정한다.
+클라이언트의 HTTP·폴링·정착 확인과 MCP 호스트의 시간 초과는 **기다림만 끝낸다**. 트윈 쪽 정지 수단은 [로봇 트윈 사용자 가이드](../../../ros/rdfp_ws/docs/twin/로봇_트윈_사용자_가이드.md)를 참고한다. 진행 중인 HTTP 요청 때문에 실제 반환 시간이 폴링·정착 상한을 넘을 수 있다. `settle_sec`는 연산 종료 후의 대기이므로 연산 실행 제한이나 호스트 제한을 늘리지 않는다. 트윈이 정착을 기다리는 경우에는 그 대기가 트윈 감시기의 `max_duration_sec` 안에 포함되어, 시한이 다가오면 정착을 확인하지 못한 채(`settled: false`) 끝난다. 호스트의 제한도 전체 대기 시간을 감안해 설정한다.
 
 ### 4.3 복구는 보장이 아니라 시도다
 

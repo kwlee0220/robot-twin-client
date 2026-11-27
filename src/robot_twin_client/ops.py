@@ -30,10 +30,72 @@ FAILURE_HINTS = {
 }
 
 
+# MoveIt 원본 오류(트윈 응답의 `error.details.moveit_error_name`)별 **원인과 다음에 할 일**
+# (트윈 설계서 6.8). `PLANNING_FAILED` 하나로는 충돌 · IK 실패 · 시작 자세 무효가 같아 보이는데,
+# 대응은 다르다 — 시작 자세가 문제면 목표를 바꿔도 소용없고, 목표가 문제면 목표를 바꿔야 한다.
+_START_INVALID = ('시작 자세가 충돌(자기충돌 포함)이나 무효로 판정됐다 — 목표를 바꿔도 결과가 같다. '
+                  'joint_states 로 현재 자세를 확인하고 먼저 그 자세에서 벗어난다. 벗어날 수 없으면 '
+                  '사람에게 알린다')
+_GOAL_INVALID = '목표가 관절 한계나 제약을 벗어난다 — 목표 값을 확인한다'
+_PLAN_STALE = '계획한 경로가 실행 전에 무효가 됐다(충돌 등) — 현재 상태를 다시 읽고 다시 계획한다'
+_STATE_STALE = '로봇 상태 수신이 끊겼다 — 로봇 스택(joint_states 발행)부터 확인한다'
+MOVEIT_HINTS = {
+    'START_STATE_IN_COLLISION': _START_INVALID,
+    'START_STATE_INVALID': _START_INVALID,
+    'START_STATE_VIOLATES_PATH_CONSTRAINTS': _START_INVALID,
+    'GOAL_IN_COLLISION': ('목표 자세가 충돌로 판정됐다 — 목표를 물체 · 탁자에서 떨어뜨리거나 '
+                          '접근 자세를 바꾼다'),
+    'GOAL_STATE_INVALID': _GOAL_INVALID,
+    'GOAL_CONSTRAINTS_VIOLATED': _GOAL_INVALID,
+    'GOAL_VIOLATES_PATH_CONSTRAINTS': _GOAL_INVALID,
+    'INVALID_GOAL_CONSTRAINTS': _GOAL_INVALID,
+    'NO_IK_SOLUTION': ('목표 pose 에 IK 해가 없다 — 작업 범위 밖이거나 그 자세로는 닿을 수 없다. '
+                       '위치를 로봇 쪽으로 당기거나 자세를 바꾼다'),
+    'PLANNING_FAILED': ('플래너가 경로를 찾지 못했다 — 중간 경유점을 두거나 목표를 바꾼다'),
+    'TIMED_OUT': '계획 시간 안에 경로를 찾지 못했다 — 중간 경유점을 두거나 목표를 바꾼다',
+    'INVALID_MOTION_PLAN': _PLAN_STALE,
+    'MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE': _PLAN_STALE,
+    'CONTROL_FAILED': ('컨트롤러가 궤적을 따르지 못했다 — 팔이 경로 중간에 있을 수 있다. ee_pose 로 '
+                       '위치부터 확인한다'),
+    'ROBOT_STATE_STALE': _STATE_STALE,
+    'SENSOR_INFO_STALE': _STATE_STALE,
+    'COMMUNICATION_FAILURE': _STATE_STALE,
+}
+
+
+def moveit_error_of(state: Optional[dict]) -> Optional[str]:
+    """실패 응답의 MoveIt 원본 오류 이름. 이름이 없으면 ``error_code=<값>``, 둘 다 없으면 ``None``.
+
+    트윈은 MoveIt 이 코드를 준 실패에만 `error.details` 를 싣는다 (설계서 6.8).
+    """
+    details = (((state or {}).get('error') or {}).get('details'))
+    if not isinstance(details, dict):
+        return None
+    name = details.get('moveit_error_name')
+    if isinstance(name, str) and name:
+        return name
+    code = details.get('moveit_error_code')
+    if isinstance(code, int) and not isinstance(code, bool):
+        return f'error_code={code}'
+    return None
+
+
 def failure_why(state: Optional[dict]) -> Optional[str]:
-    """실패로 끝난 세션 상태에서 다음에 할 일을 찾는다. 모르는 코드면 ``None``."""
+    """실패로 끝난 세션 상태에서 다음에 할 일을 찾는다. 아는 것이 없으면 ``None``.
+
+    오류 코드의 안내 뒤에 MoveIt 원인(`moveit_error_name`)별 안내를 붙인다 — 원인이 코드보다
+    구체적이라 그쪽이 다음 행동을 더 정확히 가른다.
+    """
     code = ((state or {}).get('error') or {}).get('code')
-    return FAILURE_HINTS.get(code or '')
+    parts = []
+    hint = FAILURE_HINTS.get(code or '')
+    if hint:
+        parts.append(hint)
+    moveit = moveit_error_of(state)
+    if moveit:
+        cause = MOVEIT_HINTS.get(moveit)
+        parts.append(f'MoveIt 원인 {moveit}' + (f': {cause}' if cause else ''))
+    return '. '.join(parts) if parts else None
 
 
 def _settle_sample(body: dict):
@@ -114,6 +176,28 @@ def wait_until_still(twin: RobotTwinClient, *, timeout_sec: float = 10.0,
     return None
 
 
+# 트윈이 이동 뒤 정착을 기다려 주는 입력 (트윈 설계서 6.7 "정착 대기").
+SETTLE_INPUT = 'settle_timeout_sec'
+
+_SETTLE_TIMEOUT_WHY = ('제한 시간 안에 새 유효 ee_pose 표본으로 정착을 확인하지 못했다. '
+                       '움직임 또는 관측 중단일 수 있으므로 현재 상태를 확인하고 다음 동작을 멈춘다')
+
+
+def _twin_settles(twin, operation: str) -> bool:
+    """트윈이 그 연산에서 정착 대기를 해 주는가. 모르면 ``False`` (클라이언트가 기다린다)."""
+    accepts = getattr(twin, 'accepts_input', None)
+    if callable(accepts):
+        return bool(accepts(operation, SETTLE_INPUT))
+    try:
+        ops = twin.operations()
+    except AttributeError:
+        return False
+    for op in ops:
+        if op.get('name') == operation:
+            return SETTLE_INPUT in ((op.get('inputs_schema') or {}).get('properties') or {})
+    return False
+
+
 def move_linear_verified(twin: RobotTwinClient, pose: dict, *, tol_m: float = 0.005,
                          velocity_scaling: float = 0.2, frame: Optional[str] = None,
                          settle_sec: float = 0.0) -> dict:
@@ -130,7 +214,10 @@ def move_linear_verified(twin: RobotTwinClient, pose: dict, *, tol_m: float = 0.
     권장값이 아니다.
 
     `settle_sec` 은 **고정 대기가 아니라 상한**이다 — 실제로는 `ee_pose` 가 멈출 때까지
-    기다린다 (`wait_until_still`). 고정 대기로는 얼마를 줘야 하는지 알 수 없다:
+    기다린다. **트윈이 `settle_timeout_sec` 입력을 받으면 트윈이 기다린다** — 결과의
+    `settled` 와 정착 시점의 `final_pose` 를 쓰고, 클라이언트는 폴링하지 않는다(판정 기준은
+    백엔드마다 트윈이 갖는다). 받지 않는 옛 트윈이면 여기서 `wait_until_still` 로 기다린다.
+    고정 대기로는 얼마를 줘야 하는지 알 수 없다:
     2026-09-11 에 3 초를 줬더니 하강 뒤 오차가 **7.55 mm** 로 읽혔는데 더 기다린 뒤에는
     **0.04 mm** 였고, 그 잘못 읽은 값으로 다음 목표를 만들어 삽입이 실패했다.
 
@@ -153,19 +240,27 @@ def move_linear_verified(twin: RobotTwinClient, pose: dict, *, tol_m: float = 0.
     inputs: dict = {'pose': pose, 'velocity_scaling': velocity_scaling}
     if frame is not None:
         inputs['frame'] = frame
+    server_settles = settle_sec > 0 and _twin_settles(twin, 'move_linear')
+    if server_settles:
+        inputs[SETTLE_INPUT] = settle_sec
     result = twin.run('move_linear', inputs)
     if result['status'] != 'COMPLETED':
         return _not_reached(result)
 
     # 상태 변수가 비어 있으면 키 자체가 없다 (사용자 가이드 4.3).
-    final = result.get('outputs', {}).get('final_pose')
-    if settle_sec > 0:
+    outputs = result.get('outputs', {})
+    final = outputs.get('final_pose')
+    if server_settles:
+        # 트윈이 정착을 판정했으면 `final_pose` 가 그 시점의 값이다 — 다시 읽지 않는다.
+        if outputs.get('settled') is not True:
+            return {'reached': False, 'result': result, 'reason': 'SETTLE_TIMEOUT',
+                    'why': _SETTLE_TIMEOUT_WHY}
+    elif settle_sec > 0:
         # 정착을 기다린 뒤 **다시 읽는다** — outputs 의 값은 종료 시점 스냅샷이다.
         final = wait_until_still(twin, timeout_sec=settle_sec)
         if final is None:
             return {'reached': False, 'result': result, 'reason': 'SETTLE_TIMEOUT',
-                    'why': '제한 시간 안에 새 유효 ee_pose 표본으로 정착을 확인하지 못했다. '
-                           '움직임 또는 관측 중단일 수 있으므로 현재 상태를 확인하고 다음 동작을 멈춘다'}
+                    'why': _SETTLE_TIMEOUT_WHY}
     if final is None:
         return {'reached': False, 'result': result, 'why': 'no final_pose in outputs'}
 
@@ -178,7 +273,8 @@ def move_linear_verified(twin: RobotTwinClient, pose: dict, *, tol_m: float = 0.
 
 
 def move_to_named_target_verified(twin: RobotTwinClient, target: str, *,
-                                  velocity_scaling: float = 0.3) -> dict:
+                                  velocity_scaling: float = 0.3, settle_sec: float = 0.0,
+                                  tol_rad: float = 0.01) -> dict:
     """SRDF named target 으로 이동한 뒤 도달했는지 확인한다 (사용자 가이드 4.2).
 
     판정 기준이 `move_linear` 과 다르다. 관절 공간 계획이라 **부분 실행이 없어**
@@ -190,15 +286,39 @@ def move_to_named_target_verified(twin: RobotTwinClient, target: str, *,
     `move_linear_verified` 처럼 좌표로 검증할 수단이 없다 — `reached=False` 와
     함께 `why` 를 돌려주고 판단을 호출자에게 넘긴다.
 
+    **`settle_sec > 0` 이고 트윈이 `settle_timeout_sec` 를 받으면** 트윈이 정착을 기다린 뒤
+    목표 관절값과의 차(`goal_error.joint_max_rad`)를 돌려주므로, 스택과 무관하게 그것이
+    `tol_rad` 안인지로 판정하고 `error_rad` 를 싣는다. 정착하지 못하면
+    reason=SETTLE_TIMEOUT 이다. 옛 트윈이면 위 규칙 그대로다.
+
     `target` 은 **`panda_arm` 그룹의 이름**이어야 한다 (`hand` 쪽 이름은 실패한다).
     없는 이름은 트윈이 접수 단계에서 `400 INVALID_INPUT` 으로 거부하므로 `TwinError` 가
     올라온다 — 메시지에 쓸 수 있는 이름이 함께 실린다. 트윈이 이름 목록을 못 얻은
     경우에만 접수되어 `FAILED` 로 돌아온다.
     """
-    result = twin.run('move_to_named_target',
-                      {'target': target, 'velocity_scaling': velocity_scaling})
+    for name, value in (('settle_sec', settle_sec), ('tol_rad', tol_rad)):
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f'{name} must be finite and nonnegative')
+    inputs: dict = {'target': target, 'velocity_scaling': velocity_scaling}
+    server_settles = settle_sec > 0 and _twin_settles(twin, 'move_to_named_target')
+    if server_settles:
+        inputs[SETTLE_INPUT] = settle_sec
+    result = twin.run('move_to_named_target', inputs)
     if result['status'] != 'COMPLETED':
         return _not_reached(result)
+
+    if server_settles:
+        outputs = result.get('outputs', {})
+        if outputs.get('settled') is not True:
+            return {'reached': False, 'result': result, 'reason': 'SETTLE_TIMEOUT',
+                    'why': _SETTLE_TIMEOUT_WHY}
+        error = (outputs.get('goal_error') or {}).get('joint_max_rad')
+        if not isinstance(error, (int, float)) or isinstance(error, bool):
+            # 트윈이 목표 관절값을 못 구했다(SRDF 캐시 없음 등) — 도달로 낙관하지 않는다.
+            return {'reached': False, 'result': result,
+                    'why': '정착은 확인했지만 트윈이 비교할 관절 오차(goal_error)를 주지 않았다 '
+                           '— joint_states 로 현재 관절을 직접 확인한다'}
+        return {'reached': error <= tol_rad, 'error_rad': float(error), 'result': result}
 
     # closed_loop 는 항상 온다 (6.3). 없다면 트윈 쪽이 규격을 벗어난 것이다.
     if not result.get('outputs', {}).get('closed_loop'):
@@ -209,11 +329,17 @@ def move_to_named_target_verified(twin: RobotTwinClient, target: str, *,
 
 
 def _not_reached(result: dict) -> dict:
-    """실패로 끝난 이동의 반환값. 코드를 알면 `why` 에 다음에 할 일을 싣는다."""
+    """실패로 끝난 이동의 반환값. 코드를 알면 `why` 에 다음에 할 일을 싣는다.
+
+    MoveIt 원인이 있으면 `moveit_error` 로도 싣는다 — 문장(`why`)을 파싱하지 않고 분기하게.
+    """
     out = {'reached': False, 'result': result}
     why = failure_why(result)
     if why is not None:
         out['why'] = why
+    moveit = moveit_error_of(result)
+    if moveit is not None:
+        out['moveit_error'] = moveit
     return out
 
 
@@ -242,5 +368,5 @@ def set_gripper(twin: RobotTwinClient, target: str) -> dict:
     return outputs
 
 
-__all__ = ['FAILURE_HINTS', 'failure_why', 'move_linear_verified',
+__all__ = ['FAILURE_HINTS', 'MOVEIT_HINTS', 'SETTLE_INPUT', 'failure_why', 'moveit_error_of', 'move_linear_verified',
            'move_to_named_target_verified', 'set_gripper', 'wait_until_still']

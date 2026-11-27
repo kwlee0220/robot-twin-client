@@ -236,11 +236,11 @@ outputs = state.get('outputs') or {}
 |---|---|---|---|
 | HTTP 요청 | 생성자의 `http_timeout_sec` | 30초 | 개별 HTTP 요청 |
 | 비동기 연산 폴링 | `run`·`outputs`의 `timeout_sec` | 120초 | 최초 POST 응답 이후의 폴링 |
-| 정착 확인 | `move_linear_verified`의 `settle_sec` | 0초 | 정상 종료 후 정착 확인. 0은 생략 |
+| 정착 확인 | `move_linear_verified`·`move_to_named_target_verified`의 `settle_sec` | 0초 | 정상 종료 후 정착 확인. 0은 생략. 트윈이 지원하면 트윈이 기다린다(4.1절) |
 
 동기 연산은 실행 결과가 나올 때까지 POST 응답을 기다리므로 HTTP 시간 제한을 서버의 `sync_timeout_sec`보다 길게 설정한다. 비동기 폴링 제한은 동기 연산에 적용되지 않는다. 진행 중인 HTTP 요청 때문에 폴링·정착 확인 함수의 실제 반환 시각은 지정한 상한을 넘을 수 있다. `run()`은 조회 결과가 종료 상태이면 먼저 반환하고, 아직 `RUNNING`일 때 시간 초과를 확인한다. 반면 정착 확인은 읽기가 끝난 시점에 상한을 넘었으면 그 표본으로 성공을 판정하지 않는다.
 
-`move_linear_verified()`는 내부적으로 `twin.run()`의 기본 폴링 설정을 사용한다. 현재 이 헬퍼에는 연산의 `timeout_sec`를 전달하는 인자가 없다. `settle_sec`를 늘려도 연산 실행 제한이 늘어나는 것은 아니다.
+`move_linear_verified()`는 내부적으로 `twin.run()`의 기본 폴링 설정을 사용한다. 현재 이 헬퍼에는 연산의 `timeout_sec`를 전달하는 인자가 없다. `settle_sec`를 늘려도 연산 실행 제한이 늘어나는 것은 아니다. 트윈이 정착을 기다리는 경우 그 대기는 트윈의 연산 시한(`max_duration_sec`, 기본 60초) 안에 포함되므로, 이동 시간과 `settle_sec`의 합이 그보다 길면 정착 확인이 시한에 잘린다.
 
 **시간 초과는 대기 종료이며 자동 취소가 아니다.** 서버에서 로봇 동작이 계속될 수 있으므로 상태와 `resources()`를 확인한 뒤 대응한다.
 
@@ -265,7 +265,7 @@ outputs = state.get('outputs') or {}
 | `tol_m` | `0.005` | x·y·z 각 축의 위치 오차 허용값(m) |
 | `velocity_scaling` | `0.2` | 서버에 전달할 속도 배율 |
 | `frame` | `None` | 명시하면 서버 연산 입력에 전달. 서버의 지원 여부 확인 필요 |
-| `settle_sec` | `0.0` | 정착 확인의 제한 시간(초). 유한한 0 이상의 값 |
+| `settle_sec` | `0.0` | 정착 확인의 제한 시간(초). 유한한 0 이상의 값. 트윈의 `move_linear`가 `settle_timeout_sec` 입력을 받으면 그 입력으로 넘기고, 받지 않으면 `wait_until_still()`로 직접 확인한다 |
 
 `tol_m`을 포함한 이후 인자는 키워드로 지정한다. 오차는 유클리드 거리가 아닌 `max(abs(dx), abs(dy), abs(dz))`로 계산한다. 자세 오차는 검사하지 않는다.
 
@@ -276,7 +276,12 @@ flowchart TB
     RUN -.->|"요청 거부: TwinError<br/>통신 오류<br/>폴링 시간 초과: TimeoutError"| EX["호출자에게 예외 전달"]
     STATUS -->|아니오| FAIL["reached=False<br/>result 및 가능한 why"]
     STATUS -->|예| WAIT{"settle_sec > 0?"}
-    WAIT -->|예| STILL["새 ee_pose 표본으로<br/>정착 확인"]
+    WAIT -->|예| SRV{"트윈이<br/>settle_timeout_sec 지원?"}
+    SRV -->|예| SRVOK{"outputs.settled<br/>== true?"}
+    SRVOK -->|아니오| TIMEOUT
+    SRVOK -->|예| SRVFINAL["outputs.final_pose<br/>(트윈의 정착 판정 시점 값)"]
+    SRVFINAL --> COMPARE
+    SRV -->|아니오| STILL["새 ee_pose 표본으로<br/>정착 확인"]
     STILL --> CHECK{"정착 확인 성공?"}
     CHECK -->|아니오| TIMEOUT["reached=False<br/>reason=SETTLE_TIMEOUT"]
     CHECK -->|예| FINAL["정착 확인에 사용한 관측값"]
@@ -293,11 +298,11 @@ flowchart TB
 | 상황 | 반환되는 주요 필드 |
 |---|---|
 | 위치 비교 완료 | `reached`, `error_m`, `result`. 정착 확인을 사용했으면 `settled_pose`도 포함 |
-| 접수 후 연산이 실패 상태로 종료 | `reached=False`, `result`, 알려진 실패 코드이면 `why` |
+| 접수 후 연산이 실패 상태로 종료 | `reached=False`, `result`, 알려진 실패 코드나 MoveIt 원인이 있으면 `why`, MoveIt 원인이 있으면 `moveit_error` |
 | 정착 확인 시간 초과 | `reached=False`, `reason='SETTLE_TIMEOUT'`, `why`, `result` |
 | 정착 확인 생략 후 최종 관측값 없음 | `reached=False`, `why='no final_pose in outputs'`, `result` |
 
-`result`는 트윈의 연산 결과 원문이다. JTC 스택(Isaac)이면 `result.outputs.goal_error`에 트윈이 계산한 목표 대비 잔차(`position_m`·`orientation_rad`, tip 기준)가 함께 온다. 래퍼의 `reached` 판정은 이 값을 쓰지 않고 위와 같이 축별 위치 오차로 한다. JGPC 스택(펑션베이)에는 `goal_error`가 없다. 위치 비교가 수행되지 않은 실패에는 `error_m`이 없으므로 선택 필드는 `.get()`으로 읽는다. 정착 시간 초과 시 종료 시점의 `final_pose`로 대체하지 않는다. 정착 확인을 사용했더라도 `result.outputs.final_pose`는 원래의 종료 시점 관측값이며 갱신되지 않는다. 위치 판정에 사용한 정착 후 관측값은 `settled_pose`로 반환한다. `ee_pose` 변수 값과 같은 형태이므로 위치는 `check['settled_pose']['pose']['position']`으로 읽는다. 정착 후 위치가 필요하면 `ee_pose`를 다시 읽지 말고 이 값을 사용한다. 다시 읽으면 판정 이후 바뀐 값을 얻을 수 있다. `settle_sec=0`이거나 정착 확인에 실패한 경우에는 이 필드가 없다.
+`result`는 트윈의 연산 결과 원문이다. JTC 스택(Isaac)이면 `result.outputs.goal_error`에 트윈이 계산한 목표 대비 잔차(`position_m`·`orientation_rad`, tip 기준)가 함께 온다. 래퍼의 `reached` 판정은 이 값을 쓰지 않고 위와 같이 축별 위치 오차로 한다. JGPC 스택(펑션베이)에는 정착 대기 없이는 `goal_error`가 없고, 트윈이 정착을 판정했으면(`outputs.settled == true`) 함께 온다. 위치 비교가 수행되지 않은 실패에는 `error_m`이 없으므로 선택 필드는 `.get()`으로 읽는다. 정착 시간 초과 시 종료 시점의 `final_pose`로 대체하지 않는다. 클라이언트가 직접 정착을 확인한 경우 `result.outputs.final_pose`는 원래의 종료 시점 관측값이며 갱신되지 않는다. 트윈이 정착을 기다린 경우에는 `final_pose`가 트윈의 정착 판정 시점 값이다. 어느 경우든 위치 판정에 사용한 정착 후 관측값은 `settled_pose`로 반환한다. `ee_pose` 변수 값과 같은 형태이므로 위치는 `check['settled_pose']['pose']['position']`으로 읽는다. 정착 후 위치가 필요하면 `ee_pose`를 다시 읽지 말고 이 값을 사용한다. 다시 읽으면 판정 이후 바뀐 값을 얻을 수 있다. `settle_sec=0`이거나 정착 확인에 실패한 경우에는 이 필드가 없다.
 
 기본 `settle_sec=0`은 기존 호출자와의 호환성을 위한 값이다. 정착 확인이 필요한 호출, 특히 개루프 제어에서는 양수로 지정한다. 위치 도달·정착 판정만으로 물체 파지 유지나 작업 성공까지 판정할 수는 없다.
 
@@ -318,17 +323,20 @@ flowchart TB
 
 `timeout_sec`와 `tol_m`은 유한한 0 이상의 값, `quiet_sec`와 `poll_sec`는 유한한 양수여야 한다. `move_linear_verified()`에서 호출할 때는 `settle_sec`만 정착 함수의 `timeout_sec`로 전달하고 나머지는 위 기본값을 사용한다.
 
+트윈이 `settle_timeout_sec`를 받으면 이 함수는 쓰이지 않는다. 트윈은 같은 규칙에 자세 회전까지 보고, 허용량·머무는 시간을 백엔드 프로파일(`motion.settle`)에서 가져온다 — 시뮬레이터가 이동 중 잠시 멈추는 백엔드는 머무는 시간이 길다. 지원 여부는 `RobotTwinClient.accepts_input()`이 연산 카탈로그로 확인하고 한 번만 읽는다.
+
 `SETTLE_TIMEOUT`은 계속 움직이는 경우뿐 아니라 관측 중단·품질 저하·시각 누락으로도 발생할 수 있다. 자동 정지나 취소를 의미하지 않으므로 다음 동작을 진행하기 전에 현재 관측 상태를 확인한다.
 
 ### 4.3 Named target과 그리퍼
 
 | 함수 | 판정 방식 | 반환·실패 처리 |
 |---|---|---|
-| `move_to_named_target_verified(twin, target, *, velocity_scaling=0.3)` | 정상 종료 후 `outputs.closed_loop` 확인 | 참이면 `reached=True`, 거짓이거나 없으면 `reached=False`. 접수 거부는 `TwinError`, 접수 후 연산 실패는 `reached=False` |
+| `move_to_named_target_verified(twin, target, *, velocity_scaling=0.3, settle_sec=0.0, tol_rad=0.01)` | `settle_sec > 0`이고 트윈이 정착을 기다리면 `outputs.goal_error.joint_max_rad ≤ tol_rad`; 그 밖에는 `outputs.closed_loop` 확인 | 정착 판정 시 `reached`와 `error_rad`, 정착 실패는 `reason='SETTLE_TIMEOUT'`. 폐루프 판정 시 참이면 `reached=True`, 거짓이거나 없으면 `reached=False`. 접수 거부는 `TwinError`, 접수 후 연산 실패는 `reached=False` |
 | `set_gripper(twin, target)` | `move_gripper_to_target`의 출력 전달 | 연산 실패 시 `OperationFailed`. 정상 종료 시 그리퍼 출력 dict |
-| `failure_why(state)` | 연산 오류 코드를 대응 안내로 변환 | 알려진 코드이면 문자열, 그 밖에는 `None` |
+| `failure_why(state)` | 연산 오류 코드와 MoveIt 원인(`error.details.moveit_error_name`)을 대응 안내로 변환 | 코드 안내 뒤에 `MoveIt 원인 <이름>: <안내>`를 붙인 문자열. 아는 것이 없으면 `None` |
+| `moveit_error_of(state)` | 실패 응답의 MoveIt 원본 오류 이름 | 이름, 이름 없이 코드만 있으면 `error_code=<값>`, 없으면 `None` |
 
-Named target은 `panda_arm` 그룹에 정의된 이름을 사용한다. 이 헬퍼는 목표 관절값과 관측값을 직접 비교하지 않고 서버가 보고한 폐루프 실행 여부에 근거한다. 개루프 실행에서는 정상 종료해도 도달을 보장하지 않는다.
+Named target은 `panda_arm` 그룹에 정의된 이름을 사용한다. 목표 관절값은 SRDF에 있어 클라이언트가 모르므로 이 헬퍼가 직접 비교하지 않는다. 정착 대기를 쓰면 트윈이 정착 후 목표 관절값과의 최대 차를 돌려주므로 개루프 스택에서도 도달을 판정할 수 있다. 정착 대기를 쓰지 않거나 트윈이 지원하지 않으면 서버가 보고한 폐루프 실행 여부에 근거하며, 개루프 실행에서는 정상 종료해도 도달을 보장하지 않는다.
 
 서버가 named target 목록을 확보한 경우, 없는 이름이나 다른 그룹의 이름은 접수 단계에서 `400 INVALID_INPUT`으로 거부되어 `TwinError`가 발생한다. 이 경우 `reached=False`가 반환되는 것이 아니다. 서버가 이름 목록을 확보하지 못한 경우에는 접수 후 `FAILED`로 끝나 `reached=False`가 반환될 수도 있다. 오류 메시지의 허용 이름과 `result`·`why`를 확인한다.
 
@@ -466,7 +474,7 @@ if __name__ == '__main__':
 | 구분 | 의미 | 확인할 정보 |
 |---|---|---|
 | `TwinError` | HTTP 4xx·5xx로 요청 거부 | `status`, `code`, `body` |
-| `OperationFailed` | `outputs()`가 받은 최종 상태가 `COMPLETED`가 아님. 동기 실패도 포함 | `operation`, `status`, `code`, `state` |
+| `OperationFailed` | `outputs()`가 받은 최종 상태가 `COMPLETED`가 아님. 동기 실패도 포함 | `operation`, `status`, `code`, `moveit_error`(MoveIt 원인 이름, 없으면 `None`), `state` |
 | `WrongBackend` | 기대한 백엔드와 실제 백엔드가 다름 | `purpose`, `expected`, `actual` |
 | `RuntimeError` | `read()`의 품질 확인 실패 등 | 메시지의 변수 품질·사유 |
 | `TimeoutError` | 비동기 폴링 또는 개별 소켓 요청의 시간 초과 | 메시지, 현재 상태와 자원 점유 |
